@@ -1,0 +1,171 @@
+"""SQLite access. One connection per thread, WAL mode, schema versioned via PRAGMA user_version."""
+import sqlite3
+import threading
+from contextlib import contextmanager
+
+from .config import DB_PATH
+
+_local = threading.local()
+
+MIGRATIONS: list[str] = [
+    # v1 — initial schema
+    """
+    CREATE TABLE library (
+        id          INTEGER PRIMARY KEY,
+        path        TEXT NOT NULL UNIQUE,   -- absolute path inside the container
+        name        TEXT NOT NULL,
+        mode        TEXT NOT NULL DEFAULT 'collection',  -- collection: subfolders are courses | course: folder is one course
+        enabled     INTEGER NOT NULL DEFAULT 1,
+        created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE course (
+        id            INTEGER PRIMARY KEY,
+        library_id    INTEGER REFERENCES library(id) ON DELETE SET NULL,
+        path          TEXT NOT NULL UNIQUE,   -- absolute folder path
+        title         TEXT NOT NULL,
+        description   TEXT,
+        channel       TEXT,
+        cover_path    TEXT,           -- absolute path of a sidecar cover image, if any
+        youtube_id    TEXT,           -- playlist id, if known
+        missing       INTEGER NOT NULL DEFAULT 0,
+        created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE section (
+        id         INTEGER PRIMARY KEY,
+        course_id  INTEGER NOT NULL REFERENCES course(id) ON DELETE CASCADE,
+        path       TEXT NOT NULL UNIQUE,  -- absolute folder path
+        title      TEXT NOT NULL,
+        sort_key   TEXT NOT NULL
+    );
+
+    CREATE TABLE lesson (
+        id            INTEGER PRIMARY KEY,
+        course_id     INTEGER NOT NULL REFERENCES course(id) ON DELETE CASCADE,
+        section_id    INTEGER REFERENCES section(id) ON DELETE SET NULL,
+        path          TEXT NOT NULL UNIQUE,   -- absolute file path
+        title         TEXT NOT NULL,
+        sort_key      TEXT NOT NULL,
+        size_bytes    INTEGER NOT NULL,
+        mtime         REAL NOT NULL,
+        fingerprint   TEXT NOT NULL,
+        duration_s    REAL,
+        width         INTEGER,
+        height        INTEGER,
+        vcodec        TEXT,
+        acodec        TEXT,
+        playable      TEXT NOT NULL DEFAULT 'yes',   -- yes | maybe | no
+        youtube_id    TEXT,
+        description   TEXT,
+        channel       TEXT,
+        upload_date   TEXT,
+        thumb_path    TEXT,           -- absolute path of a sidecar thumbnail, if any
+        has_embedded_cover INTEGER NOT NULL DEFAULT 0,
+        meta_source   TEXT,           -- info.json | embedded | filename
+        meta_sig      TEXT,           -- signature of sidecar files, to notice new/changed ones
+        missing       INTEGER NOT NULL DEFAULT 0,
+        created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX lesson_course ON lesson(course_id, sort_key);
+    CREATE INDEX lesson_fp ON lesson(fingerprint);
+
+    CREATE TABLE chapter (
+        id         INTEGER PRIMARY KEY,
+        lesson_id  INTEGER NOT NULL REFERENCES lesson(id) ON DELETE CASCADE,
+        start_s    REAL NOT NULL,
+        end_s      REAL,
+        title      TEXT NOT NULL
+    );
+    CREATE INDEX chapter_lesson ON chapter(lesson_id, start_s);
+
+    CREATE TABLE progress (
+        lesson_id        INTEGER PRIMARY KEY REFERENCES lesson(id) ON DELETE CASCADE,
+        position_s       REAL NOT NULL DEFAULT 0,
+        completed        INTEGER NOT NULL DEFAULT 0,
+        last_watched_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE note (
+        id           INTEGER PRIMARY KEY,
+        lesson_id    INTEGER NOT NULL REFERENCES lesson(id) ON DELETE CASCADE,
+        timestamp_s  REAL NOT NULL,
+        body_md      TEXT NOT NULL,
+        created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX note_lesson ON note(lesson_id, timestamp_s);
+
+    CREATE VIRTUAL TABLE note_fts USING fts5(body_md, content='note', content_rowid='id');
+    CREATE TRIGGER note_ai AFTER INSERT ON note BEGIN
+        INSERT INTO note_fts(rowid, body_md) VALUES (new.id, new.body_md);
+    END;
+    CREATE TRIGGER note_ad AFTER DELETE ON note BEGIN
+        INSERT INTO note_fts(note_fts, rowid, body_md) VALUES ('delete', old.id, old.body_md);
+    END;
+    CREATE TRIGGER note_au AFTER UPDATE ON note BEGIN
+        INSERT INTO note_fts(note_fts, rowid, body_md) VALUES ('delete', old.id, old.body_md);
+        INSERT INTO note_fts(rowid, body_md) VALUES (new.id, new.body_md);
+    END;
+    """,
+]
+
+
+def _connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
+
+def get_conn() -> sqlite3.Connection:
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        conn = _connect()
+        _local.conn = conn
+    return conn
+
+
+@contextmanager
+def transaction():
+    conn = get_conn()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def migrate() -> None:
+    conn = get_conn()
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    for i, sql in enumerate(MIGRATIONS[version:], start=version + 1):
+        conn.executescript("BEGIN;" + sql + f"; PRAGMA user_version={i}; COMMIT;")
+
+
+def rows(cur) -> list[dict]:
+    return [dict(r) for r in cur.fetchall()]
+
+
+def row(cur) -> dict | None:
+    r = cur.fetchone()
+    return dict(r) if r else None
+
+
+def seed_libraries(libs: list[dict]) -> None:
+    """On first start only, create libraries from the EDUNEST_LIBRARIES env var."""
+    conn = get_conn()
+    if conn.execute("SELECT COUNT(*) FROM library").fetchone()[0]:
+        return
+    from pathlib import Path
+    from .scanner import guess_mode
+    for lib in libs:
+        p = lib["path"]
+        conn.execute("INSERT OR IGNORE INTO library (path, name, mode) VALUES (?, ?, ?)",
+                     (p, lib.get("name") or Path(p).name or p, guess_mode(Path(p))))

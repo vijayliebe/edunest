@@ -1,0 +1,20 @@
+# Paste this into the UGREEN Docker app → Project → Create (or run `docker compose up -d`).
+# Mount every NAS folder that holds course videos under /media/<name>.
+# On first start each mounted folder becomes a library automatically; later, manage them
+# in the app under Settings → Library folders.
+services:
+  edunest:
+    image: edunest:latest
+    container_name: edunest
+    ports:
+      - "8090:8080"            # open http://<nas-ip>:8090
+    environment:
+      - PUID=1000              # your NAS user id   (run `id` over SSH to check)
+      - PGID=10                # your NAS group id
+      - TZ=Etc/UTC             # your timezone, e.g. Europe/Berlin
+    volumes:
+      - /volume1/docker/edunest:/data                         # database + thumbnails (back this up)
+      - /volume1/Videos/Deep Learning:/media/deep-learning:ro # :ro = app can never modify your videos
+      - /volume1/Videos/ML Systems:/media/ml-systems:ro
+      - /volume2/Courses/NLP:/media/nlp:ro
+    restart: unless-stopped

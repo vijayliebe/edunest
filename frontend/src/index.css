@@ -1,0 +1,28 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@theme {
+  --color-bg: #0b0d12;
+  --color-panel: #12151c;
+  --color-panel-2: #1a1e27;
+  --color-line: #262b36;
+  --color-muted: #8b93a7;
+  --color-accent: #6366f1;
+  --color-accent-2: #818cf8;
+  --color-note: #f59e0b;
+}
+
+html, body, #root { height: 100%; }
+body {
+  @apply bg-bg text-slate-100 antialiased;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+::selection { background: rgb(99 102 241 / 0.4); }
+* { scrollbar-width: thin; scrollbar-color: #2a2f3b transparent; }
+
+.prose-note { @apply prose prose-invert prose-sm max-w-none prose-p:my-1 prose-pre:my-2 prose-ul:my-1 prose-ol:my-1 prose-headings:my-2 prose-code:before:content-none prose-code:after:content-none; }
+.prose-note code { @apply rounded bg-white/10 px-1 py-0.5 text-[0.85em]; }
+.prose-note mark, mark { @apply rounded bg-note/30 px-0.5 text-inherit; }
+
+/* range slider used for volume */
+input[type=range].slim { @apply h-1 cursor-pointer appearance-none rounded bg-white/30 accent-white; }

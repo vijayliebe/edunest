@@ -1,0 +1,9 @@
+node_modules/
+.venv/
+__pycache__/
+frontend/dist/
+sample-media/
+.data/
+*.tar
+.DS_Store
+sample-media-metube/
