@@ -47,10 +47,33 @@ To get the best metadata for YouTube downloads, use yt-dlp with:
 yt-dlp --write-info-json --write-thumbnail --embed-chapters --embed-metadata <url>
 ```
 
+## Login and security
+
+Everything requires a login: pages show only the sign-in screen, and every API call, video stream, thumbnail and subtitle answers `401` without a valid session.
+
+- **Users are set only in `docker-compose.yml`** (`EDUNEST_USERS`). There is no sign-up page, no default account and no option to turn the login off. With no users configured, nobody can sign in. The container refuses to start if a user still has the example password from this repository.
+- **Passwords:** plain passwords (minimum 8 characters) are hashed with scrypt when the container starts. To keep them out of the compose file, store a hash instead:
+  ```bash
+  docker run --rm -it edunest:latest hash-password
+  ```
+  Paste the output as `username:scrypt:…`. Alternatively, point `EDUNEST_USERS_FILE` at a file with one `username:password` per line, e.g. a Docker secret.
+- **Sessions:** random 256-bit tokens in an `HttpOnly`, `SameSite=Lax` cookie, which is `Secure` over HTTPS. The database stores only their SHA-256 hash. Changing a user's password or removing the user (and restarting the container) signs that user out everywhere.
+- **Brute force:** after 5 failed logins, each further attempt for that username or IP address must wait exponentially longer, up to 15 minutes.
+- **Admins vs. users:** only users in `EDUNEST_ADMINS` (default: everyone) can change Settings, rescan, browse folders or see the security log. All users currently share the same notes and progress.
+- **Security log** (Settings → Security): failed and blocked logins, requests made without a login, non-admins trying admin pages, cross-site requests, and successful logins. When something keeps happening, admins see a red **Suspicious activity** badge in the header.
+
+> **Before exposing EduNest to the internet, put it behind HTTPS**, e.g. a reverse proxy with a certificate, a Cloudflare Tunnel, or Tailscale. Over plain HTTP, passwords and session cookies can be read by anyone on the network path.
+
 ## Configuration (environment variables)
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `EDUNEST_USERS` | — (required) | `user:password` or `user:scrypt:…` entries, separated by commas |
+| `EDUNEST_USERS_FILE` | — | File with one `user:password` per line (e.g. a Docker secret) |
+| `EDUNEST_ADMINS` | all users | Comma-separated usernames allowed to manage Settings and see the security log |
+| `EDUNEST_SESSION_DAYS` | `30` | How long a login stays valid |
+| `EDUNEST_COOKIE_SECURE` | `auto` | `auto` = Secure cookie when the request arrived over HTTPS; `true` forces it |
+| `EDUNEST_TRUSTED_PROXIES` | private ranges | Reverse proxies allowed to set `X-Forwarded-For` (comma-separated IPs/CIDRs) |
 | `EDUNEST_LIBRARIES` | *(every mounted folder)* | Library folders to create on **first start**, separated by `;`. After that, manage them in Settings. |
 | `EDUNEST_BROWSE_START` | `/media` | Folder the Settings folder picker opens at |
 | `PUID` / `PGID` | `1000` | User and group that own the files in `/data` |
@@ -63,7 +86,7 @@ yt-dlp --write-info-json --write-thumbnail --embed-chapters --embed-metadata <ur
 
 ```bash
 make sample          # generate fake course videos in ./sample-media (uses Docker)
-make dev-backend     # FastAPI on :18777 (terminal 1)
+make dev-backend     # FastAPI on :18777 (terminal 1); prints a random login for user 'dev'
 make dev-frontend    # Vite on :5173, proxies /api (terminal 2)
 make run             # or: build the real image and run it on http://localhost:8090
 ```

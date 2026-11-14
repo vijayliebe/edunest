@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
 import { api, type ScanStatus } from '../api'
+import { useAuth } from '../auth'
 
 export interface LayoutCtx {
   /** Bumps every time a library scan finishes, so pages can reload. */
@@ -12,6 +13,8 @@ export interface LayoutCtx {
 export const useLayout = () => useOutletContext<LayoutCtx>()
 
 export default function Layout() {
+  const { user, logout } = useAuth()
+  const [alert, setAlert] = useState<string[] | null>(null)
   const [scan, setScan] = useState<ScanStatus | null>(null)
   const [scanVersion, setScanVersion] = useState(0)
   const wasRunning = useRef(false)
@@ -34,6 +37,15 @@ export default function Layout() {
     void poll()
     return () => window.clearTimeout(timer.current)
   }, [poll])
+
+  // Admins: poll the security log summary and show a warning badge when something keeps happening
+  useEffect(() => {
+    if (!user.is_admin) return
+    const check = () => api.securitySummary().then((s) => setAlert(s.alert ? s.reasons : null)).catch(() => {})
+    void check()
+    const t = window.setInterval(check, 60_000)
+    return () => window.clearInterval(t)
+  }, [user.is_admin])
 
   const startScan = useCallback(
     async (force = false) => {
@@ -59,6 +71,17 @@ export default function Layout() {
               Scanning {scan.processed}/{scan.total || '…'}
             </span>
           )}
+          {alert && (
+            <Link
+              to="/settings#security"
+              title={alert.join('\n')}
+              className="mr-1 flex items-center gap-1.5 rounded-full bg-red-500/20 px-3 py-1 text-xs font-semibold text-red-300 hover:bg-red-500/30"
+            >
+              <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
+              <span className="hidden sm:inline">Suspicious activity</span>
+            </Link>
+          )}
+          {user.is_admin && (
           <button
             onClick={() => void startScan()}
             disabled={scan?.running}
@@ -69,6 +92,8 @@ export default function Layout() {
               <path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
+          )}
+          {user.is_admin && (
           <NavLink
             to="/settings"
             title="Settings"
@@ -79,6 +104,17 @@ export default function Layout() {
               <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" />
             </svg>
           </NavLink>
+          )}
+          <button
+            onClick={() => void logout()}
+            title={`Signed in as ${user.username} — sign out`}
+            className="ml-1 flex items-center gap-2 rounded-full border border-line py-1 pl-1 pr-3 text-xs text-muted hover:bg-white/10 hover:text-white"
+          >
+            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-accent text-[11px] font-bold uppercase text-white">
+              {user.username.slice(0, 1)}
+            </span>
+            <span className="hidden sm:inline">Sign out</span>
+          </button>
         </div>
       </header>
       <main className="flex-1">

@@ -8,9 +8,10 @@ PORT     ?= 18777
 
 ## Local development (two terminals): backend on :18777, Vite on :5173 (proxies /api)
 dev-backend:
-	cd backend && [ -d .venv ] || python3.12 -m venv .venv; \
+	@PW=$$(openssl rand -hex 8); echo "Login: dev / $$PW"; \
+	cd backend && { [ -d .venv ] || python3.12 -m venv .venv; } && \
 	.venv/bin/pip install -q -r requirements.txt && \
-	EDUNEST_DATA_DIR=$(CURDIR)/.data EDUNEST_LIBRARIES=$(CURDIR)/sample-media \
+	EDUNEST_DATA_DIR=$(CURDIR)/.data EDUNEST_LIBRARIES=$(CURDIR)/sample-media EDUNEST_USERS=dev:$$PW \
 	.venv/bin/uvicorn app.main:app --reload --port $(PORT)
 
 dev-frontend:
@@ -40,11 +41,12 @@ push:
 ## Run the locally built image against ./sample-media on http://localhost:8090
 run: build
 	docker rm -f edunest-local 2>/dev/null || true
+	@PW=$$(openssl rand -hex 8); \
 	docker run -d --name edunest-local -p 8090:8080 \
-	  -e EDUNEST_LIBRARIES=/media/sample \
+	  -e EDUNEST_LIBRARIES=/media/sample -e EDUNEST_USERS=dev:$$PW \
 	  -v $(CURDIR)/sample-media:/media/sample:ro \
-	  -v edunest-local-data:/data $(IMAGE):$(TAG)
-	@echo "EduNest running on http://localhost:8090"
+	  -v edunest-local-data:/data $(IMAGE):$(TAG) >/dev/null && \
+	echo "EduNest running on http://localhost:8090  (login: dev / $$PW)"
 
 stop:
 	docker rm -f edunest-local

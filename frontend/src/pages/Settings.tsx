@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api, type Library } from '../api'
+import { useAuth } from '../auth'
 import { useLayout } from '../components/Layout'
 import { useLoad } from '../util'
 
@@ -9,6 +10,12 @@ const MODES: { value: Library['mode']; label: string; hint: string }[] = [
 ]
 
 export default function Settings() {
+  const { user } = useAuth()
+  if (!user.is_admin) return <p className="mx-auto max-w-3xl px-6 py-12 text-muted">Settings are only available to admins.</p>
+  return <AdminSettings />
+}
+
+function AdminSettings() {
   const { scan, startScan, scanVersion } = useLayout()
   const libs = useLoad(() => api.libraries(), [scanVersion])
   const [adding, setAdding] = useState(false)
@@ -141,6 +148,139 @@ export default function Settings() {
           <p key={e} className="mt-1 text-sm text-amber-300">{e}</p>
         ))}
       </section>
+
+      <SecuritySection />
+    </div>
+  )
+}
+
+const KIND_LABEL: Record<string, string> = {
+  login_ok: 'Signed in',
+  login_failed: 'Failed login',
+  login_throttled: 'Blocked (too many failures)',
+  unauthorized: 'Access without login',
+  forbidden: 'Non-admin tried admin page',
+  bad_origin: 'Cross-site request blocked',
+}
+
+function SecuritySection() {
+  const summary = useLoad(() => api.securitySummary(), [])
+  const events = useLoad(() => api.securityEvents(100), [])
+  const [onlySuspicious, setOnlySuspicious] = useState(true)
+
+  useEffect(() => {
+    if (window.location.hash === '#security') document.getElementById('security')?.scrollIntoView()
+  }, [summary.data])
+
+  const s = summary.data
+  const list = (events.data ?? []).filter((e) => !onlySuspicious || e.kind !== 'login_ok')
+  const n = (k: string, period: 'last_24h' | 'last_7d' = 'last_24h') => s?.[period][k] ?? 0
+
+  return (
+    <section id="security" className="mt-10 scroll-mt-20">
+      <div className="flex items-end justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-semibold">Security</h2>
+          <p className="text-sm text-muted">Login attempts and requests made without permission. Repeats from the same address are grouped per minute.</p>
+        </div>
+        <button
+          onClick={() => {
+            void summary.reload()
+            void events.reload()
+          }}
+          className="shrink-0 rounded-full border border-line px-3 py-1 text-sm hover:bg-white/10"
+        >
+          Refresh
+        </button>
+      </div>
+
+      {s && (
+        <div className={`mt-4 rounded-xl border p-4 ${s.alert ? 'border-red-500/50 bg-red-500/10' : 'border-emerald-500/30 bg-emerald-500/5'}`}>
+          {s.alert ? (
+            <>
+              <p className="font-semibold text-red-300">⚠ Suspicious activity in the last 24 hours</p>
+              <ul className="mt-1 list-disc pl-5 text-sm text-red-200">
+                {s.reasons.map((r) => <li key={r}>{r}</li>)}
+              </ul>
+              <p className="mt-2 text-xs text-red-200/80">
+                If this keeps happening, consider turning off public access (port forwarding / tunnel) for a while.
+                Failed logins are slowed down automatically, so guessing passwords stays impractical.
+              </p>
+            </>
+          ) : (
+            <p className="text-sm text-emerald-300">✓ Nothing unusual in the last 24 hours.</p>
+          )}
+          <div className="mt-3 grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
+            <Stat label="Failed logins" a={n('login_failed')} b={n('login_failed', 'last_7d')} />
+            <Stat label="Blocked" a={n('login_throttled')} b={n('login_throttled', 'last_7d')} />
+            <Stat label="No-login access" a={n('unauthorized')} b={n('unauthorized', 'last_7d')} />
+            <Stat label="Successful logins" a={n('login_ok')} b={n('login_ok', 'last_7d')} />
+          </div>
+          {s.top_ips.length > 0 && (
+            <p className="mt-3 text-xs text-muted">
+              Most active addresses (7 days):{' '}
+              {s.top_ips.map((t) => `${t.ip} (${t.n})`).join(', ')}
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="mt-4 flex items-center gap-3 text-sm">
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={onlySuspicious} onChange={(e) => setOnlySuspicious(e.target.checked)} />
+          Hide successful logins
+        </label>
+        <button
+          onClick={async () => {
+            if (!confirm('Clear the whole security log?')) return
+            await api.clearSecurityEvents()
+            void summary.reload()
+            void events.reload()
+          }}
+          className="ml-auto rounded-full px-3 py-1 text-muted hover:bg-white/10 hover:text-white"
+        >
+          Clear log
+        </button>
+      </div>
+
+      <div className="mt-2 overflow-x-auto rounded-xl border border-line">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-panel-2 text-xs text-muted">
+            <tr>
+              <th className="px-3 py-2 font-medium">When (UTC)</th>
+              <th className="px-3 py-2 font-medium">What</th>
+              <th className="px-3 py-2 font-medium">Address</th>
+              <th className="px-3 py-2 font-medium">User / path</th>
+              <th className="px-3 py-2 text-right font-medium">Times</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-line">
+            {list.map((e) => (
+              <tr key={e.id} className={e.kind === 'login_ok' ? 'text-muted' : ''}>
+                <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{e.at}</td>
+                <td className={`px-3 py-2 ${e.kind === 'login_ok' ? '' : 'text-amber-300'}`}>{KIND_LABEL[e.kind] ?? e.kind}</td>
+                <td className="px-3 py-2 font-mono text-xs">{e.ip}</td>
+                <td className="max-w-56 truncate px-3 py-2 font-mono text-xs" title={e.path ?? ''}>{e.username ?? e.path ?? ''}</td>
+                <td className="px-3 py-2 text-right">{e.count}</td>
+              </tr>
+            ))}
+            {list.length === 0 && (
+              <tr>
+                <td colSpan={5} className="px-3 py-6 text-center text-muted">No events.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  )
+}
+
+function Stat({ label, a, b }: { label: string; a: number; b: number }) {
+  return (
+    <div className="rounded-lg bg-bg/50 px-3 py-2">
+      <div className="text-lg font-semibold">{a}</div>
+      <div className="text-xs text-muted">{label} · {b} in 7 days</div>
     </div>
   )
 }

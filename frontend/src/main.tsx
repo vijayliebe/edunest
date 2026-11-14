@@ -3,6 +3,7 @@ import './index.css'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import { AuthGate } from './auth'
 import Layout from './components/Layout'
 import CoursePage from './pages/Course'
 import Home from './pages/Home'
@@ -13,6 +14,7 @@ import Watch from './pages/Watch'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
+    <AuthGate>
     <BrowserRouter>
       <Routes>
         <Route element={<Layout />}>
@@ -25,5 +27,6 @@ createRoot(document.getElementById('root')!).render(
         </Route>
       </Routes>
     </BrowserRouter>
+    </AuthGate>
   </StrictMode>,
 )

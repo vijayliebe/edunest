@@ -165,11 +165,40 @@ export interface BrowseResult {
   dirs: string[]
 }
 
+export interface Me {
+  username: string
+  is_admin: boolean
+}
+
+export interface SecuritySummary {
+  alert: boolean
+  reasons: string[]
+  last_24h: Record<string, number>
+  last_7d: Record<string, number>
+  top_ips: { ip: string; n: number; last_at: string }[]
+}
+
+export interface SecurityEvent {
+  id: number
+  first_at: string
+  at: string
+  kind: string
+  ip: string | null
+  username: string | null
+  path: string | null
+  count: number
+}
+
+/** Fired when any API call answers 401 (session expired / logged out elsewhere). */
+export const UNAUTHORIZED_EVENT = 'edunest:unauthorized'
+
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     ...init,
+    credentials: 'same-origin',
     headers: init?.body ? { 'Content-Type': 'application/json', ...init.headers } : init?.headers,
   })
+  if (res.status === 401 && !url.startsWith('/api/auth/')) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
   if (!res.ok) {
     let msg = `${res.status} ${res.statusText}`
     try {
@@ -187,6 +216,13 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
 const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) })
 
 export const api = {
+  me: () => req<Me>('/api/auth/me'),
+  login: (username: string, password: string) => req<Me>('/api/auth/login', json('POST', { username, password })),
+  logout: () => req<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+  securitySummary: () => req<SecuritySummary>('/api/security/summary'),
+  securityEvents: (limit = 100) => req<SecurityEvent[]>(`/api/security/events?limit=${limit}`),
+  clearSecurityEvents: () => req<void>('/api/security/events', { method: 'DELETE' }),
+
   courses: () => req<CourseSummary[]>('/api/courses'),
   course: (id: number) => req<CourseDetail>(`/api/courses/${id}`),
   courseNotes: (id: number) => req<CourseNote[]>(`/api/courses/${id}/notes`),

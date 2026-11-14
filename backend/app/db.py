@@ -110,6 +110,33 @@ MIGRATIONS: list[str] = [
         INSERT INTO note_fts(rowid, body_md) VALUES (new.id, new.body_md);
     END;
     """,
+    # v2 — login sessions (only a SHA-256 of each token is stored)
+    """
+    CREATE TABLE session (
+        token_hash  TEXT PRIMARY KEY,
+        username    TEXT NOT NULL,
+        user_fp     TEXT NOT NULL,
+        created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        expires_at  TEXT NOT NULL,
+        ip          TEXT,
+        user_agent  TEXT
+    );
+    CREATE INDEX session_expires ON session(expires_at);
+
+    -- security log: repeated events from the same ip/kind/user within a minute are merged (count)
+    CREATE TABLE security_event (
+        id        INTEGER PRIMARY KEY,
+        at        TEXT NOT NULL DEFAULT (datetime('now')),
+        first_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        kind      TEXT NOT NULL,
+        ip        TEXT,
+        username  TEXT,
+        path      TEXT,
+        count     INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE INDEX security_event_at ON security_event(at);
+    CREATE INDEX security_event_kind ON security_event(kind, ip, at);
+    """,
 ]
 
 

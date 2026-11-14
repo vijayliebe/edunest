@@ -6,11 +6,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import media, scanner
+from . import auth, media, scanner, security
 from .config import (BROWSE_ROOT, BROWSE_START, COMPLETE_RATIO, DATA_DIR, SCAN_INTERVAL_MIN, SCAN_ON_STARTUP, SEED_LIBRARIES, STATIC_DIR,
                      SUBTITLE_EXTS, THUMBS_DIR)
 from .db import get_conn, migrate, row, rows, seed_libraries, transaction
@@ -22,6 +23,9 @@ log = logging.getLogger("edunest")
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     migrate()
+    auth.init_users()          # raises (container exits) on a malformed EDUNEST_USERS
+    auth.purge_stale_sessions()
+    security.prune()
     seed_libraries([{"path": p, "name": Path(p).name} for p in SEED_LIBRARIES] or mounted_folders())
     log.info("libraries=%s  ffprobe=%s  ffmpeg=%s", [l["path"] for l in scanner.enabled_libraries()],
              bool(media.FFPROBE), bool(media.FFMPEG))
@@ -41,12 +45,155 @@ def _periodic_scan() -> None:
             log.exception("periodic scan failed")
 
 
-app = FastAPI(title="EduNest", lifespan=lifespan)
+# No interactive API docs: they would only advertise the API surface.
+app = FastAPI(title="EduNest", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 MIME = {".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
         ".mkv": "video/x-matroska", ".avi": "video/x-msvideo", ".wmv": "video/x-ms-wmv",
         ".flv": "video/x-flv", ".ts": "video/mp2t"}
-THUMB_CACHE = {"Cache-Control": "public, max-age=604800"}
+THUMB_CACHE = {"Cache-Control": "private, max-age=604800"}  # private: never stored by shared proxies/CDNs
+
+
+# ---------------------------------------------------------------- access control (deny by default)
+
+# The ONLY /api endpoints reachable without a session. Everything else under /api — including any
+# endpoint added in the future — requires a valid login. There is no other way in.
+PUBLIC_API = {("POST", "/api/auth/login"), ("POST", "/api/auth/logout"), ("GET", "/api/auth/me"),
+              ("GET", "/api/health")}
+ADMIN_PREFIXES = ("/api/libraries", "/api/fs/", "/api/library/rescan", "/api/security")
+STATE_CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
+
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+       "media-src 'self' blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; "
+       "form-action 'self'; frame-ancestors 'none'")
+
+
+def client_ip(request: Request) -> str:
+    return request.client.host if request.client else "?"
+
+
+def _same_origin(request: Request) -> bool:
+    if request.headers.get("sec-fetch-site") == "cross-site":
+        return False
+    origin = request.headers.get("origin")
+    if not origin or origin == "null":
+        return origin is None
+    netloc = origin.split("://", 1)[-1].rstrip("/").lower()
+    hosts = {h.strip().lower() for h in (request.headers.get("host", ""),
+                                          request.headers.get("x-forwarded-host", "")) for h in h.split(",") if h.strip()}
+    return netloc in hosts
+
+
+def _deny(status: int, detail: str) -> JSONResponse:
+    return JSONResponse({"detail": detail}, status_code=status, headers={"Cache-Control": "no-store"})
+
+
+@app.middleware("http")
+async def access_guard(request: Request, call_next):
+    path, method = request.url.path, request.method
+    is_api = path == "/api" or path.startswith("/api/")
+
+    if method in STATE_CHANGING and not _same_origin(request):
+        security.record("bad_origin", client_ip(request), path=path)
+        return _deny(403, "Cross-site request blocked")
+
+    if is_api:
+        key = ("GET" if method == "HEAD" else method, path)
+        if key not in PUBLIC_API:
+            user = auth.session_user(request.cookies.get(auth.SESSION_COOKIE))
+            if user is None:
+                security.record("unauthorized", client_ip(request), path=path)
+                return _deny(401, "Login required")
+            if path.startswith(ADMIN_PREFIXES) and not user.is_admin:
+                security.record("forbidden", client_ip(request), user.username, path)
+                return _deny(403, "Admins only")
+            request.state.user = user
+    elif method not in ("GET", "HEAD"):
+        return _deny(405, "Method not allowed")
+
+    response = await call_next(request)
+    h = response.headers
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    h.setdefault("X-Frame-Options", "DENY")
+    h.setdefault("Referrer-Policy", "same-origin")
+    h.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    h.setdefault("Content-Security-Policy", CSP)
+    if request.url.scheme == "https":
+        h.setdefault("Strict-Transport-Security", "max-age=31536000")
+    if is_api:
+        h.setdefault("Cache-Control", "private, no-store")
+    return response
+
+
+# ---------------------------------------------------------------- auth endpoints
+
+class LoginIn(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+def _me(user: auth.User) -> dict:
+    return {"username": user.username, "is_admin": user.is_admin}
+
+
+@app.post("/api/auth/login")
+def login(body: LoginIn, request: Request):
+    ip = client_ip(request)
+    uname = body.username.lower()
+    keys = (f"ip:{ip}", f"user:{uname}|{ip}", f"user:{uname}")
+    wait = auth.throttle.retry_after(*keys)
+    if wait > 0:
+        security.record("login_throttled", ip, body.username)
+        return JSONResponse({"detail": f"Too many failed attempts. Try again in {int(wait) + 1} seconds."},
+                            status_code=429, headers={"Retry-After": str(int(wait) + 1), "Cache-Control": "no-store"})
+    user = auth.authenticate(body.username, body.password)
+    if user is None:
+        auth.throttle.failure(*keys)
+        security.record("login_failed", ip, body.username)
+        return _deny(401, "Wrong username or password")
+    auth.throttle.success(*keys)
+    token = auth.create_session(user, ip, request.headers.get("user-agent"))
+    security.record("login_ok", ip, user.username)
+    resp = JSONResponse(_me(user), headers={"Cache-Control": "no-store"})
+    resp.set_cookie(auth.SESSION_COOKIE, token, max_age=int(auth.SESSION_DAYS * 86400), path="/",
+                    httponly=True, samesite="lax", secure=auth.cookie_secure(request.url.scheme))
+    return resp
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request):
+    auth.delete_session(request.cookies.get(auth.SESSION_COOKIE))
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(auth.SESSION_COOKIE, path="/")
+    return resp
+
+
+@app.get("/api/auth/me")
+def me(request: Request):
+    user = auth.session_user(request.cookies.get(auth.SESSION_COOKIE))
+    if user is None:
+        return JSONResponse({"detail": "Login required", "users_configured": auth.users_configured()},
+                            status_code=401, headers={"Cache-Control": "no-store"})
+    return _me(user)
+
+
+# ---------------------------------------------------------------- security log (admins)
+
+@app.get("/api/security/summary")
+def security_summary():
+    return security.summary()
+
+
+@app.get("/api/security/events")
+def security_events(limit: int = 100):
+    return security.recent(limit)
+
+
+@app.delete("/api/security/events", status_code=204)
+def security_clear():
+    with transaction() as c:
+        c.execute("DELETE FROM security_event")
+    return Response(status_code=204)
 
 
 # ---------------------------------------------------------------- helpers
@@ -101,7 +248,7 @@ def subtitle_files(video: Path) -> list[Path]:
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ffmpeg": bool(media.FFMPEG), "ffprobe": bool(media.FFPROBE)}
+    return {"ok": True}  # public (used by the Docker healthcheck), so it reveals nothing else
 
 
 @app.get("/api/library/status")
@@ -383,7 +530,7 @@ def course_thumb(course_id: int):
     if not c:
         raise HTTPException(404)
     if c["cover_path"] and Path(c["cover_path"]).is_file():
-        return FileResponse(c["cover_path"], headers={"Cache-Control": "public, max-age=3600"})
+        return FileResponse(c["cover_path"], headers={"Cache-Control": "private, max-age=3600"})
     lessons = ordered_lessons(course_id)
     if not lessons:
         raise HTTPException(404)
@@ -591,3 +738,10 @@ def spa(full_path: str):
     if index.is_file():
         return FileResponse(index, headers={"Cache-Control": "no-cache"})
     return HTMLResponse("<h1>EduNest API is running</h1><p>Frontend not built. Run the Vite dev server.</p>")
+
+
+# ---------------------------------------------------------------- startup self-check
+# Every route except the static SPA shell must live under /api/, where the access guard applies.
+for _r in app.routes:
+    if isinstance(_r, APIRoute) and not _r.path.startswith("/api/") and _r.endpoint is not spa:
+        raise RuntimeError(f"route {_r.path} is outside /api and would bypass authentication")

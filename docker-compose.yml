@@ -12,6 +12,12 @@ services:
       - PUID=1000              # your NAS user id   (run `id` over SSH to check)
       - PGID=10                # your NAS group id
       - TZ=Etc/UTC             # your timezone, e.g. Europe/Berlin
+      # --- Login (required) ---------------------------------------------------------------
+      # Only these users can sign in. Format: username:password, separated by commas.
+      # Better: store a hash instead of the password —  docker run --rm -it edunest:latest hash-password
+      # then use  username:scrypt:32768:8:1:...  (no $ signs, so no escaping needed).
+      - EDUNEST_USERS=admin:change-me-to-a-long-password
+      - EDUNEST_ADMINS=admin   # who may change Settings and see the security log (default: everyone)
     volumes:
       - /volume1/docker/edunest:/data                         # database + thumbnails (back this up)
       - /volume1/Videos/Deep Learning:/media/deep-learning:ro # :ro = app can never modify your videos
