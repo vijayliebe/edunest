@@ -21,7 +21,15 @@ An open-source, self-hosted learning app for your NAS or home server. It turns f
 2. **Create a Project** in the Docker app and paste [docker-compose.yml](docker-compose.yml). Edit the volume lines so each NAS folder with videos is mounted under `/media/...`, and set `PUID`/`PGID` to your NAS user (run `id` over SSH to find them).
 3. Open `http://<nas-ip>:8090`. On first start, each mounted folder is added as a library and scanned. Check **Settings** to switch any of them between *Folder of courses* and *Single course*.
 
-Everything you create (notes and progress) lives in the `/data` volume (`edunest.db`), so include that folder in your NAS backups.
+### Your data
+
+Everything EduNest stores lives in the `/data` volume:
+
+- `edunest.db` is a SQLite database with users added in Settings, course access, each user's progress and notes, and the security log.
+- `secret.key` is used to keep logins stable across restarts.
+- `thumbs/` holds generated thumbnails.
+
+Every change is written to disk (`synchronous=FULL`) before the app replies, so a crash, a container restart, an image update or a power cut doesn't lose saved notes or progress. At most the last few seconds of the playback position can be lost. **Include the `/data` folder in your NAS backups.** Your video folders are mounted read-only and are never modified.
 
 ### Adding another video folder later
 1. Add a volume line to the compose file, e.g. `- /volume2/New Courses:/media/new:ro`.
@@ -59,7 +67,11 @@ Everything requires a login: pages show only the sign-in screen, and every API c
   Paste the output as `username:scrypt:…`. Alternatively, point `EDUNEST_USERS_FILE` at a file with one `username:password` per line, e.g. a Docker secret.
 - **Sessions:** random 256-bit tokens in an `HttpOnly`, `SameSite=Lax` cookie, which is `Secure` over HTTPS. The database stores only their SHA-256 hash. Changing a user's password or removing the user (and restarting the container) signs that user out everywhere.
 - **Brute force:** after 5 failed logins, each further attempt for that username or IP address must wait exponentially longer, up to 15 minutes.
-- **Admins vs. users:** only users in `EDUNEST_ADMINS` (default: everyone) can change Settings, rescan, browse folders or see the security log. All users currently share the same notes and progress.
+- **Admins vs. users:** only users in `EDUNEST_ADMINS` (default: every compose user) can change Settings, rescan, browse folders, manage users or see the security log.
+- **More users from the app:** admins can add regular users with a username and password under **Settings → Users & access**, and reset their password or delete them. Admins can only be defined in docker-compose, so no one can make themselves an admin from inside the app. Every user change is recorded in the security log.
+- **Per-user data:** progress, completed lessons, *Continue watching*, notes, note search and note export belong to each user. Nobody, not even an admin, sees another user's notes.
+- **Course access:** admins see every course. For each other user, an admin picks **All courses** or **Selected courses only**. A new user sees nothing until access is granted. Courses a user can't see behave as if they don't exist (`404`), including their videos, thumbnails and search results.
+- **Upgrading from a version without per-user data:** existing progress and notes are assigned to the first admin listed in `EDUNEST_USERS`.
 - **Security log** (Settings → Security): failed and blocked logins, requests made without a login, non-admins trying admin pages, cross-site requests, and successful logins. When something keeps happening, admins see a red **Suspicious activity** badge in the header.
 
 > **Before exposing EduNest to the internet, put it behind HTTPS**, e.g. a reverse proxy with a certificate, a Cloudflare Tunnel, or Tailscale. Over plain HTTP, passwords and session cookies can be read by anyone on the network path.

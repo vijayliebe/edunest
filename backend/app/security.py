@@ -7,6 +7,7 @@ Kinds:
   unauthorized      request to a protected URL without a valid session (direct access attempt)
   forbidden         logged-in non-admin tried an admin-only endpoint
   bad_origin        state-changing request from another website (CSRF attempt)
+  user_created / user_deleted / password_reset   admin actions on app users (for the audit trail)
 """
 import logging
 
@@ -24,7 +25,7 @@ def record(kind: str, ip: str | None, username: str | None = None, path: str | N
     ip = (ip or "?")[:64]
     username = (username or "")[:64] or None
     path = (path or "")[:200] or None
-    level = logging.INFO if kind == "login_ok" else logging.WARNING
+    level = logging.WARNING if kind in SUSPICIOUS else logging.INFO
     log.log(level, "%s ip=%s user=%s path=%s", kind, ip, username or "-", path or "-")
     try:
         with transaction() as c:

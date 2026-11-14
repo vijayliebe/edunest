@@ -189,6 +189,21 @@ export interface SecurityEvent {
   count: number
 }
 
+export interface AppUser {
+  username: string
+  is_admin: boolean
+  source: 'compose' | 'app'
+  mode?: 'all' | 'selected'
+  course_ids?: number[]
+}
+
+export interface AdminCourse {
+  id: number
+  title: string
+  library: string | null
+  lesson_count: number
+}
+
 /** Fired when any API call answers 401 (session expired / logged out elsewhere). */
 export const UNAUTHORIZED_EVENT = 'edunest:unauthorized'
 
@@ -219,6 +234,14 @@ export const api = {
   me: () => req<Me>('/api/auth/me'),
   login: (username: string, password: string) => req<Me>('/api/auth/login', json('POST', { username, password })),
   logout: () => req<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+  users: () => req<AppUser[]>('/api/users'),
+  createUser: (username: string, password: string) => req<AppUser>('/api/users', json('POST', { username, password })),
+  deleteUser: (username: string) => req<void>(`/api/users/${encodeURIComponent(username)}`, { method: 'DELETE' }),
+  resetPassword: (username: string, password: string) =>
+    req<{ ok: boolean }>(`/api/users/${encodeURIComponent(username)}/password`, json('PUT', { password })),
+  setAccess: (username: string, mode: 'all' | 'selected', course_ids: number[]) =>
+    req<AppUser>(`/api/users/${encodeURIComponent(username)}/access`, json('PUT', { mode, course_ids })),
+  adminCourses: () => req<AdminCourse[]>('/api/admin/courses'),
   securitySummary: () => req<SecuritySummary>('/api/security/summary'),
   securityEvents: (limit = 100) => req<SecurityEvent[]>(`/api/security/events?limit=${limit}`),
   clearSecurityEvents: () => req<void>('/api/security/events', { method: 'DELETE' }),

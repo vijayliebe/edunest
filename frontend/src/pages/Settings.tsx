@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api, type Library } from '../api'
 import { useAuth } from '../auth'
 import { useLayout } from '../components/Layout'
+import UsersAccess from '../components/UsersAccess'
 import { useLoad } from '../util'
 
 const MODES: { value: Library['mode']; label: string; hint: string }[] = [
@@ -149,6 +150,8 @@ function AdminSettings() {
         ))}
       </section>
 
+      <UsersAccess />
+
       <SecuritySection />
     </div>
   )
@@ -161,6 +164,9 @@ const KIND_LABEL: Record<string, string> = {
   unauthorized: 'Access without login',
   forbidden: 'Non-admin tried admin page',
   bad_origin: 'Cross-site request blocked',
+  user_created: 'User added',
+  user_deleted: 'User deleted',
+  password_reset: 'Password reset',
 }
 
 function SecuritySection() {
@@ -258,7 +264,7 @@ function SecuritySection() {
             {list.map((e) => (
               <tr key={e.id} className={e.kind === 'login_ok' ? 'text-muted' : ''}>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{e.at}</td>
-                <td className={`px-3 py-2 ${e.kind === 'login_ok' ? '' : 'text-amber-300'}`}>{KIND_LABEL[e.kind] ?? e.kind}</td>
+                <td className={`px-3 py-2 ${['login_ok', 'user_created', 'user_deleted', 'password_reset'].includes(e.kind) ? '' : 'text-amber-300'}`}>{KIND_LABEL[e.kind] ?? e.kind}</td>
                 <td className="px-3 py-2 font-mono text-xs">{e.ip}</td>
                 <td className="max-w-56 truncate px-3 py-2 font-mono text-xs" title={e.path ?? ''}>{e.username ?? e.path ?? ''}</td>
                 <td className="px-3 py-2 text-right">{e.count}</td>

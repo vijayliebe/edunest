@@ -137,6 +137,46 @@ MIGRATIONS: list[str] = [
     CREATE INDEX security_event_at ON security_event(at);
     CREATE INDEX security_event_kind ON security_event(kind, ip, at);
     """,
+    # v3 — per-user progress & notes, per-user course access.
+    # Existing rows get username '' and are handed to the first admin at startup (auth.assign_legacy_data).
+    """
+    CREATE TABLE progress_new (
+        username         TEXT NOT NULL,
+        lesson_id        INTEGER NOT NULL REFERENCES lesson(id) ON DELETE CASCADE,
+        position_s       REAL NOT NULL DEFAULT 0,
+        completed        INTEGER NOT NULL DEFAULT 0,
+        last_watched_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (username, lesson_id)
+    );
+    INSERT INTO progress_new (username, lesson_id, position_s, completed, last_watched_at)
+        SELECT '', lesson_id, position_s, completed, last_watched_at FROM progress;
+    DROP TABLE progress;
+    ALTER TABLE progress_new RENAME TO progress;
+    CREATE INDEX progress_user ON progress(username, last_watched_at);
+
+    ALTER TABLE note ADD COLUMN username TEXT NOT NULL DEFAULT '';
+    CREATE INDEX note_user ON note(username, lesson_id, timestamp_s);
+
+    -- Course access for non-admin users. Admins always see everything.
+    -- mode 'all' = every course; 'selected' = only rows in user_course. No row = no access.
+    CREATE TABLE user_access (
+        username  TEXT PRIMARY KEY,
+        mode      TEXT NOT NULL DEFAULT 'selected'
+    );
+    CREATE TABLE user_course (
+        username   TEXT NOT NULL,
+        course_id  INTEGER NOT NULL REFERENCES course(id) ON DELETE CASCADE,
+        PRIMARY KEY (username, course_id)
+    );
+
+    -- Regular (non-admin) users added by an admin in Settings. Admins exist only in docker-compose.
+    CREATE TABLE app_user (
+        username       TEXT PRIMARY KEY,
+        password_hash  TEXT NOT NULL,
+        created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+        created_by     TEXT
+    );
+    """,
 ]
 
 
@@ -145,7 +185,7 @@ def _connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA synchronous=FULL")  # every commit is on disk before we reply
     return conn
 
 

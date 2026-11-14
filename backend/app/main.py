@@ -11,7 +11,7 @@ from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import auth, media, scanner, security
+from . import access, auth, media, scanner, security
 from .config import (BROWSE_ROOT, BROWSE_START, COMPLETE_RATIO, DATA_DIR, SCAN_INTERVAL_MIN, SCAN_ON_STARTUP, SEED_LIBRARIES, STATIC_DIR,
                      SUBTITLE_EXTS, THUMBS_DIR)
 from .db import get_conn, migrate, row, rows, seed_libraries, transaction
@@ -25,6 +25,7 @@ async def lifespan(_app: FastAPI):
     migrate()
     auth.init_users()          # raises (container exits) on a malformed EDUNEST_USERS
     auth.purge_stale_sessions()
+    access.assign_legacy_data()  # progress/notes from before per-user data → first admin
     security.prune()
     seed_libraries([{"path": p, "name": Path(p).name} for p in SEED_LIBRARIES] or mounted_folders())
     log.info("libraries=%s  ffprobe=%s  ffmpeg=%s", [l["path"] for l in scanner.enabled_libraries()],
@@ -60,7 +61,8 @@ THUMB_CACHE = {"Cache-Control": "private, max-age=604800"}  # private: never sto
 # endpoint added in the future — requires a valid login. There is no other way in.
 PUBLIC_API = {("POST", "/api/auth/login"), ("POST", "/api/auth/logout"), ("GET", "/api/auth/me"),
               ("GET", "/api/health")}
-ADMIN_PREFIXES = ("/api/libraries", "/api/fs/", "/api/library/rescan", "/api/security")
+ADMIN_PREFIXES = ("/api/libraries", "/api/fs/", "/api/library/rescan", "/api/security", "/api/users",
+                  "/api/admin/")
 STATE_CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
 
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
@@ -205,24 +207,18 @@ def media_path(path: str) -> Path:
     return p
 
 
-def get_lesson(lesson_id: int) -> dict:
-    lesson = row(get_conn().execute("SELECT * FROM lesson WHERE id=?", (lesson_id,)))
-    if not lesson:
-        raise HTTPException(404, "lesson not found")
-    return lesson
-
-
-def ordered_lessons(course_id: int) -> list[dict]:
+def ordered_lessons(course_id: int, username: str) -> list[dict]:
+    """Lessons of a course in curriculum order, with THIS user's progress and note counts."""
     return rows(get_conn().execute(
         """SELECT l.id, l.title, l.section_id, l.duration_s, l.playable, l.fingerprint,
                   s.title AS section_title,
                   COALESCE(p.completed, 0) AS completed, COALESCE(p.position_s, 0) AS position_s,
-                  (SELECT COUNT(*) FROM note n WHERE n.lesson_id = l.id) AS notes_count
+                  (SELECT COUNT(*) FROM note n WHERE n.lesson_id = l.id AND n.username = ?) AS notes_count
            FROM lesson l
            LEFT JOIN section s ON s.id = l.section_id
-           LEFT JOIN progress p ON p.lesson_id = l.id
+           LEFT JOIN progress p ON p.lesson_id = l.id AND p.username = ?
            WHERE l.course_id = ? AND l.missing = 0
-           ORDER BY (l.section_id IS NOT NULL), s.sort_key, l.sort_key""", (course_id,)))
+           ORDER BY (l.section_id IS NOT NULL), s.sort_key, l.sort_key""", (username, username, course_id)))
 
 
 def thumb_url(lesson: dict) -> str:
@@ -252,8 +248,11 @@ def health():
 
 
 @app.get("/api/library/status")
-def library_status():
-    return scanner.status
+def library_status(request: Request):
+    if access.current_user(request).is_admin:
+        return scanner.status
+    # non-admins only need the progress indicator, not folder paths or errors
+    return {k: scanner.status[k] for k in ("running", "processed", "total", "started_at", "finished_at")}
 
 
 class LibraryIn(BaseModel):
@@ -394,22 +393,26 @@ def library_rescan(force: bool = False):
 
 
 # ---------------------------------------------------------------- courses
+# Every endpoint below is scoped to the logged-in user: progress and notes are theirs only,
+# and courses/lessons are limited to what an admin granted (access.py).
 
 @app.get("/api/courses")
-def list_courses():
+def list_courses(request: Request):
+    user = access.current_user(request)
+    clause, params = access.course_clause(user, "c.id")
     data = rows(get_conn().execute(
-        """SELECT c.id, c.title, c.channel, c.cover_path IS NOT NULL AS has_cover,
+        f"""SELECT c.id, c.title, c.channel, c.cover_path IS NOT NULL AS has_cover,
                   COUNT(l.id) AS lesson_count,
                   COALESCE(SUM(l.duration_s), 0) AS total_duration_s,
                   COALESCE(SUM(p.completed), 0) AS completed_count,
                   MAX(p.last_watched_at) AS last_watched_at,
                   (SELECT COUNT(*) FROM note n JOIN lesson l2 ON l2.id = n.lesson_id
-                    WHERE l2.course_id = c.id) AS notes_count
+                    WHERE l2.course_id = c.id AND n.username = ?) AS notes_count
            FROM course c
            JOIN lesson l ON l.course_id = c.id AND l.missing = 0
-           LEFT JOIN progress p ON p.lesson_id = l.id
-           WHERE c.missing = 0
-           GROUP BY c.id"""))
+           LEFT JOIN progress p ON p.lesson_id = l.id AND p.username = ?
+           WHERE c.missing = 0{clause}
+           GROUP BY c.id""", (user.username, user.username, *params)))
     for c in data:
         c["thumb_url"] = f"/api/thumbs/course/{c['id']}"
     data.sort(key=lambda c: scanner.natural_key(c["title"]))
@@ -417,12 +420,13 @@ def list_courses():
 
 
 @app.get("/api/courses/{course_id}")
-def course_detail(course_id: int):
+def course_detail(course_id: int, request: Request):
+    user = access.require_course(request, course_id)
     course = row(get_conn().execute(
-        "SELECT id, title, description, channel, youtube_id, path FROM course WHERE id=?", (course_id,)))
+        "SELECT id, title, description, channel, youtube_id FROM course WHERE id=?", (course_id,)))
     if not course:
         raise HTTPException(404, "course not found")
-    lessons = ordered_lessons(course_id)
+    lessons = ordered_lessons(course_id, user.username)
     sections: list[dict] = []
     for l in lessons:
         l["thumb_url"] = thumb_url(l)
@@ -446,16 +450,17 @@ def course_detail(course_id: int):
 # ---------------------------------------------------------------- lessons
 
 @app.get("/api/lessons/{lesson_id}")
-def lesson_detail(lesson_id: int):
-    l = get_lesson(lesson_id)
+def lesson_detail(lesson_id: int, request: Request):
+    user, l = access.require_lesson(request, lesson_id)
     conn = get_conn()
     course = row(conn.execute("SELECT id, title FROM course WHERE id=?", (l["course_id"],)))
     section = row(conn.execute("SELECT title FROM section WHERE id=?", (l["section_id"],))) if l["section_id"] else None
     chapters = rows(conn.execute(
         "SELECT start_s, end_s, title FROM chapter WHERE lesson_id=? ORDER BY start_s", (lesson_id,)))
-    prog = row(conn.execute("SELECT position_s, completed, last_watched_at FROM progress WHERE lesson_id=?",
-                            (lesson_id,)))
-    order = ordered_lessons(l["course_id"])
+    prog = row(conn.execute(
+        "SELECT position_s, completed, last_watched_at FROM progress WHERE username=? AND lesson_id=?",
+        (user.username, lesson_id)))
+    order = ordered_lessons(l["course_id"], user.username)
     idx = next((i for i, x in enumerate(order) if x["id"] == lesson_id), None)
 
     def brief(x):
@@ -486,17 +491,17 @@ def lesson_detail(lesson_id: int):
 
 
 @app.get("/api/lessons/{lesson_id}/stream")
-def lesson_stream(lesson_id: int):
-    l = get_lesson(lesson_id)
+def lesson_stream(lesson_id: int, request: Request):
+    _, l = access.require_lesson(request, lesson_id)
     p = media_path(l["path"])
     # Starlette's FileResponse handles HTTP Range requests, so seeking is instant.
     return FileResponse(p, media_type=MIME.get(p.suffix.lower(), "application/octet-stream"),
-                        content_disposition_type="inline")
+                        content_disposition_type="inline", headers={"Cache-Control": "private, no-store"})
 
 
 @app.get("/api/lessons/{lesson_id}/subtitles/{index}")
-def lesson_subtitle(lesson_id: int, index: int):
-    l = get_lesson(lesson_id)
+def lesson_subtitle(lesson_id: int, index: int, request: Request):
+    _, l = access.require_lesson(request, lesson_id)
     files = subtitle_files(media_path(l["path"]))
     if not 0 <= index < len(files):
         raise HTTPException(404)
@@ -508,12 +513,10 @@ def lesson_subtitle(lesson_id: int, index: int):
 
 # ---------------------------------------------------------------- thumbnails
 
-@app.get("/api/thumbs/lesson/{lesson_id}")
-def lesson_thumb(lesson_id: int):
-    l = get_lesson(lesson_id)
+def _lesson_thumb_response(l: dict):
     if l["thumb_path"] and Path(l["thumb_path"]).is_file():
         return FileResponse(l["thumb_path"], headers=THUMB_CACHE)
-    cached = THUMBS_DIR / f"l{lesson_id}-{l['fingerprint'][:10]}.jpg"
+    cached = THUMBS_DIR / f"l{l['id']}-{l['fingerprint'][:10]}.jpg"
     if not cached.is_file():
         src = media_path(l["path"])
         cover_stream = None
@@ -524,20 +527,30 @@ def lesson_thumb(lesson_id: int):
     return FileResponse(cached, media_type="image/jpeg", headers=THUMB_CACHE)
 
 
+@app.get("/api/thumbs/lesson/{lesson_id}")
+def lesson_thumb(lesson_id: int, request: Request):
+    _, l = access.require_lesson(request, lesson_id)
+    return _lesson_thumb_response(l)
+
+
 @app.get("/api/thumbs/course/{course_id}")
-def course_thumb(course_id: int):
+def course_thumb(course_id: int, request: Request):
+    access.require_course(request, course_id)
     c = row(get_conn().execute("SELECT cover_path FROM course WHERE id=?", (course_id,)))
     if not c:
         raise HTTPException(404)
     if c["cover_path"] and Path(c["cover_path"]).is_file():
-        return FileResponse(c["cover_path"], headers={"Cache-Control": "private, max-age=3600"})
-    lessons = ordered_lessons(course_id)
-    if not lessons:
+        return FileResponse(c["cover_path"], headers=THUMB_CACHE)
+    first = row(get_conn().execute(
+        """SELECT l.* FROM lesson l LEFT JOIN section s ON s.id = l.section_id
+           WHERE l.course_id = ? AND l.missing = 0
+           ORDER BY (l.section_id IS NOT NULL), s.sort_key, l.sort_key LIMIT 1""", (course_id,)))
+    if not first:
         raise HTTPException(404)
-    return lesson_thumb(lessons[0]["id"])
+    return _lesson_thumb_response(first)
 
 
-# ---------------------------------------------------------------- progress
+# ---------------------------------------------------------------- progress (per user)
 
 class ProgressIn(BaseModel):
     position_s: float = Field(ge=0)
@@ -545,42 +558,46 @@ class ProgressIn(BaseModel):
 
 
 @app.put("/api/progress/{lesson_id}")
-def save_progress(lesson_id: int, body: ProgressIn):
-    l = get_lesson(lesson_id)
+def save_progress(lesson_id: int, body: ProgressIn, request: Request):
+    user, l = access.require_lesson(request, lesson_id)
     with transaction() as c:
-        prev = row(c.execute("SELECT completed FROM progress WHERE lesson_id=?", (lesson_id,)))
+        prev = row(c.execute("SELECT completed FROM progress WHERE username=? AND lesson_id=?",
+                             (user.username, lesson_id)))
         if body.completed is not None:
             completed = body.completed
         else:
             reached = bool(l["duration_s"]) and body.position_s >= COMPLETE_RATIO * l["duration_s"]
             completed = bool(prev and prev["completed"]) or reached
         c.execute(
-            """INSERT INTO progress (lesson_id, position_s, completed, last_watched_at)
-               VALUES (?,?,?,datetime('now'))
-               ON CONFLICT(lesson_id) DO UPDATE SET position_s=excluded.position_s,
+            """INSERT INTO progress (username, lesson_id, position_s, completed, last_watched_at)
+               VALUES (?,?,?,?,datetime('now'))
+               ON CONFLICT(username, lesson_id) DO UPDATE SET position_s=excluded.position_s,
                  completed=excluded.completed, last_watched_at=excluded.last_watched_at""",
-            (lesson_id, body.position_s, int(completed)))
+            (user.username, lesson_id, body.position_s, int(completed)))
     return {"lesson_id": lesson_id, "position_s": body.position_s, "completed": completed}
 
 
 @app.get("/api/continue-watching")
-def continue_watching(limit: int = 12):
-    """Per course: the most recent lesson if unfinished, otherwise the next unfinished one."""
+def continue_watching(request: Request, limit: int = 12):
+    """Per course: the user's most recent lesson if unfinished, otherwise the next unfinished one."""
+    user = access.current_user(request)
+    clause, params = access.course_clause(user, "c.id")
     conn = get_conn()
     recent = rows(conn.execute(
-        """SELECT l.course_id, p.lesson_id, p.position_s, p.completed, p.last_watched_at
+        f"""SELECT l.course_id, p.lesson_id, p.position_s, p.completed, p.last_watched_at
            FROM progress p JOIN lesson l ON l.id = p.lesson_id
            JOIN course c ON c.id = l.course_id
-           WHERE l.missing = 0 AND c.missing = 0
+           WHERE p.username = ? AND l.missing = 0 AND c.missing = 0{clause}
            AND p.last_watched_at = (SELECT MAX(p2.last_watched_at) FROM progress p2
-                                    JOIN lesson l2 ON l2.id = p2.lesson_id WHERE l2.course_id = l.course_id)
-           ORDER BY p.last_watched_at DESC"""))
+                                    JOIN lesson l2 ON l2.id = p2.lesson_id
+                                    WHERE l2.course_id = l.course_id AND p2.username = p.username)
+           ORDER BY p.last_watched_at DESC""", (user.username, *params)))
     out, seen = [], set()
     for r in recent:
         if r["course_id"] in seen:
             continue
         seen.add(r["course_id"])
-        order = ordered_lessons(r["course_id"])
+        order = ordered_lessons(r["course_id"], user.username)
         idx = next((i for i, x in enumerate(order) if x["id"] == r["lesson_id"]), None)
         if idx is None:
             continue
@@ -601,7 +618,7 @@ def continue_watching(limit: int = 12):
     return out
 
 
-# ---------------------------------------------------------------- notes
+# ---------------------------------------------------------------- notes (per user)
 
 class NoteIn(BaseModel):
     timestamp_s: float = Field(ge=0)
@@ -616,64 +633,79 @@ class NotePatch(BaseModel):
 NOTE_COLS = "n.id, n.lesson_id, n.timestamp_s, n.body_md, n.created_at, n.updated_at"
 
 
+def _own_note(request: Request, note_id: int) -> auth.User:
+    """The note must belong to the user AND sit in a course they can still see; else 404."""
+    user = access.current_user(request)
+    n = row(get_conn().execute("SELECT username, lesson_id FROM note WHERE id=?", (note_id,)))
+    if not n or n["username"] != user.username:
+        raise HTTPException(404, "note not found")
+    access.require_lesson(request, n["lesson_id"])
+    return user
+
+
 @app.get("/api/lessons/{lesson_id}/notes")
-def lesson_notes(lesson_id: int):
+def lesson_notes(lesson_id: int, request: Request):
+    user, _ = access.require_lesson(request, lesson_id)
     return rows(get_conn().execute(
-        f"SELECT {NOTE_COLS} FROM note n WHERE n.lesson_id=? ORDER BY n.timestamp_s, n.id", (lesson_id,)))
+        f"SELECT {NOTE_COLS} FROM note n WHERE n.lesson_id=? AND n.username=? ORDER BY n.timestamp_s, n.id",
+        (lesson_id, user.username)))
 
 
 @app.post("/api/lessons/{lesson_id}/notes", status_code=201)
-def create_note(lesson_id: int, body: NoteIn):
-    get_lesson(lesson_id)
+def create_note(lesson_id: int, body: NoteIn, request: Request):
+    user, _ = access.require_lesson(request, lesson_id)
     with transaction() as c:
-        nid = c.execute("INSERT INTO note (lesson_id, timestamp_s, body_md) VALUES (?,?,?)",
-                        (lesson_id, body.timestamp_s, body.body_md)).lastrowid
+        nid = c.execute("INSERT INTO note (username, lesson_id, timestamp_s, body_md) VALUES (?,?,?,?)",
+                        (user.username, lesson_id, body.timestamp_s, body.body_md)).lastrowid
         return row(c.execute(f"SELECT {NOTE_COLS} FROM note n WHERE n.id=?", (nid,)))
 
 
 @app.patch("/api/notes/{note_id}")
-def update_note(note_id: int, body: NotePatch):
+def update_note(note_id: int, body: NotePatch, request: Request):
+    user = _own_note(request, note_id)
     fields = body.model_dump(exclude_none=True)
     with transaction() as c:
-        if not c.execute("SELECT 1 FROM note WHERE id=?", (note_id,)).fetchone():
-            raise HTTPException(404)
         if fields:
             sets = ", ".join(f"{k}=?" for k in fields)
-            c.execute(f"UPDATE note SET {sets}, updated_at=datetime('now') WHERE id=?", (*fields.values(), note_id))
+            c.execute(f"UPDATE note SET {sets}, updated_at=datetime('now') WHERE id=? AND username=?",
+                      (*fields.values(), note_id, user.username))
         return row(c.execute(f"SELECT {NOTE_COLS} FROM note n WHERE n.id=?", (note_id,)))
 
 
 @app.delete("/api/notes/{note_id}", status_code=204)
-def delete_note(note_id: int):
+def delete_note(note_id: int, request: Request):
+    user = _own_note(request, note_id)
     with transaction() as c:
-        c.execute("DELETE FROM note WHERE id=?", (note_id,))
+        c.execute("DELETE FROM note WHERE id=? AND username=?", (note_id, user.username))
     return Response(status_code=204)
 
 
-def _course_notes(course_id: int) -> list[dict]:
-    order = {l["id"]: i for i, l in enumerate(ordered_lessons(course_id))}
+def _course_notes(course_id: int, username: str) -> list[dict]:
+    order = {l["id"]: i for i, l in enumerate(ordered_lessons(course_id, username))}
     notes = rows(get_conn().execute(
         f"""SELECT {NOTE_COLS}, l.title AS lesson_title, s.title AS section_title
             FROM note n JOIN lesson l ON l.id = n.lesson_id LEFT JOIN section s ON s.id = l.section_id
-            WHERE l.course_id = ?""", (course_id,)))
+            WHERE l.course_id = ? AND n.username = ?""", (course_id, username)))
     notes.sort(key=lambda n: (order.get(n["lesson_id"], 10**9), n["timestamp_s"], n["id"]))
     return notes
 
 
 @app.get("/api/courses/{course_id}/notes")
-def course_notes(course_id: int):
-    return _course_notes(course_id)
+def course_notes(course_id: int, request: Request):
+    user = access.require_course(request, course_id)
+    return _course_notes(course_id, user.username)
 
 
 @app.get("/api/courses/{course_id}/notes/export.md")
 def export_notes(course_id: int, request: Request):
+    user = access.require_course(request, course_id)
     course = row(get_conn().execute("SELECT title FROM course WHERE id=?", (course_id,)))
     if not course:
         raise HTTPException(404)
     base = str(request.base_url).rstrip("/")
     lines = [f"# {course['title']} — notes", ""]
     cur_section, cur_lesson = object(), None
-    for n in _course_notes(course_id):
+    for n in _course_notes(course_id, user.username):
         if n["section_title"] != cur_section:
             cur_section = n["section_title"]
             if cur_section:
@@ -692,18 +724,23 @@ def export_notes(course_id: int, request: Request):
 # ---------------------------------------------------------------- search
 
 @app.get("/api/search")
-def search(q: str, limit: int = 30):
-    q = q.strip()
+def search(q: str, request: Request, limit: int = 30):
+    user = access.current_user(request)
+    q = q.strip()[:200]
     if not q:
         return {"courses": [], "lessons": [], "notes": []}
+    limit = min(max(limit, 1), 100)
+    clause, params = access.course_clause(user, "c.id")
     conn = get_conn()
     like = f"%{q}%"
     courses = rows(conn.execute(
-        "SELECT id, title FROM course WHERE missing=0 AND title LIKE ? ORDER BY title LIMIT ?", (like, limit)))
+        f"SELECT c.id, c.title FROM course c WHERE c.missing=0 AND c.title LIKE ?{clause} ORDER BY c.title LIMIT ?",
+        (like, *params, limit)))
     lessons = rows(conn.execute(
-        """SELECT l.id, l.title, l.fingerprint, c.title AS course_title, l.duration_s FROM lesson l
+        f"""SELECT l.id, l.title, l.fingerprint, c.title AS course_title, l.duration_s FROM lesson l
            JOIN course c ON c.id = l.course_id
-           WHERE l.missing=0 AND (l.title LIKE ? OR l.description LIKE ?) LIMIT ?""", (like, like, limit)))
+           WHERE l.missing=0 AND (l.title LIKE ? OR l.description LIKE ?){clause} LIMIT ?""",
+        (like, like, *params, limit)))
     for l in lessons:
         l["thumb_url"] = thumb_url(l)
         del l["fingerprint"]
@@ -712,13 +749,100 @@ def search(q: str, limit: int = 30):
     if tokens:
         fts_q = " ".join(f'"{t}"*' for t in tokens)
         notes = rows(conn.execute(
-            """SELECT n.id, n.lesson_id, n.timestamp_s,
+            f"""SELECT n.id, n.lesson_id, n.timestamp_s,
                       snippet(note_fts, 0, '<mark>', '</mark>', '…', 24) AS snippet,
                       l.title AS lesson_title, c.title AS course_title, c.id AS course_id
                FROM note_fts JOIN note n ON n.id = note_fts.rowid
                JOIN lesson l ON l.id = n.lesson_id JOIN course c ON c.id = l.course_id
-               WHERE note_fts MATCH ? ORDER BY rank LIMIT ?""", (fts_q, limit)))
+               WHERE note_fts MATCH ? AND n.username = ?{clause} ORDER BY rank LIMIT ?""",
+            (fts_q, user.username, *params, limit)))
     return {"courses": courses, "lessons": lessons, "notes": notes}
+
+
+# ---------------------------------------------------------------- users & course access (admins)
+
+class AccessIn(BaseModel):
+    mode: str = Field(pattern="^(all|selected)$")
+    course_ids: list[int] = Field(default_factory=list, max_length=100_000)
+
+
+class NewUserIn(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class PasswordIn(BaseModel):
+    password: str = Field(min_length=1, max_length=1024)
+
+
+def _user_item(u: auth.User) -> dict:
+    item = {"username": u.username, "is_admin": u.is_admin, "source": u.source}
+    if not u.is_admin:
+        item.update(access.access_of(u.username))
+    return item
+
+
+@app.get("/api/users")
+def list_users():
+    return [_user_item(u) for u in auth.all_users()]
+
+
+@app.post("/api/users", status_code=201)
+def create_user(body: NewUserIn, request: Request):
+    admin = access.current_user(request)
+    try:
+        u = auth.create_app_user(body.username.strip(), body.password, admin.username)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    security.record("user_created", client_ip(request), admin.username, f"created user {u.username}")
+    return _user_item(u)
+
+
+@app.put("/api/users/{username}/password")
+def reset_user_password(username: str, body: PasswordIn, request: Request):
+    admin = access.current_user(request)
+    try:
+        auth.set_app_user_password(username, body.password)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    except LookupError as e:
+        raise HTTPException(404, str(e)) from None
+    security.record("password_reset", client_ip(request), admin.username, f"reset password of {username}")
+    return {"ok": True}
+
+
+@app.delete("/api/users/{username}", status_code=204)
+def delete_user(username: str, request: Request):
+    admin = access.current_user(request)
+    try:
+        auth.delete_app_user(username)
+    except LookupError as e:
+        raise HTTPException(404, str(e)) from None
+    security.record("user_deleted", client_ip(request), admin.username, f"deleted user {username}")
+    return Response(status_code=204)
+
+
+@app.put("/api/users/{username}/access")
+def set_user_access(username: str, body: AccessIn):
+    user = auth.get_user(username)
+    if user is None:
+        raise HTTPException(404, "unknown user")
+    if user.is_admin:
+        raise HTTPException(400, "Admins always see every course")
+    access.set_access(username, body.mode, body.course_ids)
+    return {"username": username, "is_admin": False, **access.access_of(username)}
+
+
+@app.get("/api/admin/courses")
+def admin_course_list():
+    """All courses (for the access picker), regardless of the admin's own progress."""
+    data = rows(get_conn().execute(
+        """SELECT c.id, c.title, lb.name AS library, COUNT(l.id) AS lesson_count
+           FROM course c LEFT JOIN library lb ON lb.id = c.library_id
+           JOIN lesson l ON l.course_id = c.id AND l.missing = 0
+           WHERE c.missing = 0 GROUP BY c.id"""))
+    data.sort(key=lambda c: scanner.natural_key(c["title"]))
+    return data
 
 
 # ---------------------------------------------------------------- SPA

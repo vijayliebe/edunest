@@ -23,6 +23,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .config import DATA_DIR
 from .db import get_conn, row, transaction
 
 log = logging.getLogger("edunest.auth")
@@ -54,9 +55,26 @@ def _unb64(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 
-def hash_password(password: str) -> str:
+def _server_key() -> bytes:
+    """Random key created once in /data. Used to derive stable salts for plain-text compose passwords,
+    so their hash (and therefore existing logins) survives container restarts."""
+    path = DATA_DIR / "secret.key"
+    try:
+        key = path.read_bytes()
+        if len(key) >= 32:
+            return key
+    except FileNotFoundError:
+        pass
+    key = secrets.token_bytes(32)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(key)
+    return key
+
+
+def hash_password(password: str, salt: bytes | None = None) -> str:
     """Returns 'scrypt:N:r:p:salt:hash' (no '$' characters, so it can be pasted into docker-compose)."""
-    salt = secrets.token_bytes(16)
+    salt = salt or secrets.token_bytes(16)
     dk = hashlib.scrypt(password.encode(), salt=salt, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P,
                         maxmem=SCRYPT_MAXMEM, dklen=32)
     return f"scrypt:{SCRYPT_N}:{SCRYPT_R}:{SCRYPT_P}:{_b64(salt)}:{_b64(dk)}"
@@ -85,13 +103,16 @@ class User:
     username: str
     password_hash: str
     is_admin: bool
+    source: str = "compose"  # compose = EDUNEST_USERS (can be admin) | app = added by an admin in Settings
 
     @property
     def fingerprint(self) -> str:
         return hashlib.sha256(self.password_hash.encode()).hexdigest()[:32]
 
 
-_users: dict[str, User] = {}
+_env_users: dict[str, User] = {}   # from docker-compose (fixed until restart)
+_users: dict[str, User] = {}       # env users + users added in Settings (replaced atomically)
+_users_lock = threading.Lock()
 
 
 def load_users() -> dict[str, User]:
@@ -131,7 +152,8 @@ def load_users() -> dict[str, User]:
                 raise AuthConfigError(f"user {name!r} still uses the example password — choose your own in EDUNEST_USERS")
             if len(secret) < MIN_PASSWORD_LEN:
                 raise AuthConfigError(f"password for user {name!r} is shorter than {MIN_PASSWORD_LEN} characters")
-            pw_hash = hash_password(secret)
+            salt = hmac.new(_server_key(), b"user-salt:" + name.encode(), hashlib.sha256).digest()[:16]
+            pw_hash = hash_password(secret, salt)
         users[name] = User(name, pw_hash, is_admin=(not admins) or name in admins)
 
     unknown_admins = admins - users.keys()
@@ -140,9 +162,21 @@ def load_users() -> dict[str, User]:
     return users
 
 
-def init_users() -> None:
+def _refresh_users() -> None:
+    """Merge compose users with app users from the DB. Compose users win on a name clash, and
+    app users are never admins."""
     global _users
-    _users = load_users()
+    merged = dict(_env_users)
+    for r in get_conn().execute("SELECT username, password_hash FROM app_user ORDER BY created_at, username"):
+        if r["username"] not in merged:
+            merged[r["username"]] = User(r["username"], r["password_hash"], is_admin=False, source="app")
+    _users = merged
+
+
+def init_users() -> None:
+    global _env_users
+    _env_users = load_users()
+    _refresh_users()
     if not _users:
         log.warning("No users configured (EDUNEST_USERS). Nobody can log in until you add some.")
     else:
@@ -152,6 +186,73 @@ def init_users() -> None:
 
 def users_configured() -> bool:
     return bool(_users)
+
+
+def all_users() -> list[User]:
+    return list(_users.values())  # in the order they appear in EDUNEST_USERS
+
+
+def first_admin() -> str | None:
+    return next((u.username for u in _users.values() if u.is_admin), None)
+
+
+def get_user(username: str) -> User | None:
+    return _users.get(username)
+
+
+def password_problem(password: str) -> str | None:
+    if len(password) < MIN_PASSWORD_LEN:
+        return f"Password must be at least {MIN_PASSWORD_LEN} characters"
+    if len(password) > 1024:
+        return "Password is too long"
+    if password.lower() in PUBLISHED_PASSWORDS:
+        return "This password is too well known — choose another"
+    return None
+
+
+def create_app_user(username: str, password: str, created_by: str) -> User:
+    if not USERNAME_RE.match(username):
+        raise ValueError("Username may contain letters, digits and _ . @ - (max 64)")
+    problem = password_problem(password)
+    if problem:
+        raise ValueError(problem)
+    with _users_lock:
+        if username in _users:
+            raise ValueError("A user with this name already exists")
+        with transaction() as c:
+            c.execute("INSERT INTO app_user (username, password_hash, created_by) VALUES (?,?,?)",
+                      (username, hash_password(password), created_by))
+            # Fresh account: no course access until an admin grants it; no leftover data.
+            for t in ("user_access", "user_course", "progress", "note", "session"):
+                c.execute(f"DELETE FROM {t} WHERE username=?", (username,))
+        _refresh_users()
+    return _users[username]
+
+
+def set_app_user_password(username: str, password: str) -> None:
+    problem = password_problem(password)
+    if problem:
+        raise ValueError(problem)
+    with _users_lock:
+        u = _users.get(username)
+        if not u or u.source != "app":
+            raise LookupError("Only users added in Settings can be changed here")
+        with transaction() as c:
+            c.execute("UPDATE app_user SET password_hash=? WHERE username=?", (hash_password(password), username))
+            c.execute("DELETE FROM session WHERE username=?", (username,))  # sign out everywhere
+        _refresh_users()
+
+
+def delete_app_user(username: str) -> None:
+    with _users_lock:
+        u = _users.get(username)
+        if not u or u.source != "app":
+            raise LookupError("Only users added in Settings can be deleted here")
+        with transaction() as c:
+            c.execute("DELETE FROM app_user WHERE username=?", (username,))
+            for t in ("session", "user_access", "user_course", "progress", "note"):
+                c.execute(f"DELETE FROM {t} WHERE username=?", (username,))
+        _refresh_users()
 
 
 # ---------------------------------------------------------------- brute-force protection
