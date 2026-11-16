@@ -18,9 +18,37 @@ services:
       # then use  username:scrypt:32768:8:1:...  (no $ signs, so no escaping needed).
       - EDUNEST_USERS=admin:change-me-to-a-long-password
       - EDUNEST_ADMINS=admin   # who may change Settings and see the security log (default: everyone)
+      # --- Transcripts and subtitles (optional; remove these two lines and the lectern service to turn off) ---
+      - EDUNEST_AI_URL=http://lectern:8000
+      - EDUNEST_AI_KEY=change-me-to-a-random-string   # same value as LECTERN_API_KEY below; e.g. openssl rand -hex 24
     volumes:
       - /volume1/docker/edunest:/data                         # database + thumbnails (back this up)
       - /volume1/Videos/Deep Learning:/media/deep-learning:ro # :ro = app can never modify your videos
       - /volume1/Videos/ML Systems:/media/ml-systems:ro
       - /volume2/Courses/NLP:/media/nlp:ro
+    restart: unless-stopped
+
+  # Transcripts: subtitle files next to the video -> YouTube captions -> speech-to-text on the NAS.
+  # No port is published: only EduNest talks to it. Mount the SAME folders at the SAME paths as above.
+  lectern:
+    image: lectern:latest
+    container_name: lectern
+    environment:
+      - PUID=1000
+      - PGID=10
+      - TZ=Etc/UTC
+      - LECTERN_API_KEY=change-me-to-a-random-string     # same value as EDUNEST_AI_KEY above
+      - LECTERN_YT_NAME_SEARCH=1       # look up videos without a YouTube id by title + length
+      - LECTERN_WHISPER_MODEL=small    # speech-to-text model: small (fast) or large-v3-turbo (more accurate)
+      - LECTERN_WHISPER_THREADS=4      # CPU threads for speech-to-text (the i3-1315U has 8)
+      # Optional: reuse MeTube's YouTube cookies if YouTube starts asking for a bot check
+      # (Settings -> Transcripts shows that). Lectern works on its own copy, so MeTube's file is never touched.
+      # - LECTERN_YT_COOKIES=/cookies/cookies.txt
+    volumes:
+      - /volume1/docker/lectern:/data                           # transcripts + downloaded speech model (~0.5 GB)
+      # - /volume1/docker/metube/cookies:/cookies:ro          # same folder MeTube mounts at /cookies
+      - /volume1/Videos/Deep Learning:/media/deep-learning:ro
+      - /volume1/Videos/ML Systems:/media/ml-systems:ro
+      - /volume2/Courses/NLP:/media/nlp:ro
+    cpus: 4                          # keep half the CPU free for everything else on the NAS
     restart: unless-stopped

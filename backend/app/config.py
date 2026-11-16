@@ -25,6 +25,10 @@ IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 SUBTITLE_EXTS = (".vtt", ".srt")
 COVER_NAMES = ("cover", "folder", "poster", "thumbnail")
 
+# Optional transcript/AI service (Lectern). Unset = feature off, nothing is sent anywhere.
+AI_URL = os.environ.get("EDUNEST_AI_URL", "").strip().rstrip("/")
+AI_KEY = os.environ.get("EDUNEST_AI_KEY", "").strip()
+
 # A lesson counts as completed once this fraction has been watched.
 COMPLETE_RATIO = 0.9
 

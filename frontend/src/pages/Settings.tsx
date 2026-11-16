@@ -150,10 +150,58 @@ function AdminSettings() {
         ))}
       </section>
 
+      <TranscriptsSection />
+
       <UsersAccess />
 
       <SecuritySection />
     </div>
+  )
+}
+
+function TranscriptsSection() {
+  const st = useLoad(() => api.transcriptsStatus(), [])
+  useEffect(() => {
+    const h = window.setInterval(() => void st.reload(), 15_000)
+    return () => window.clearInterval(h)
+  }, [st.reload])
+  const d = st.data
+  if (!d) return null
+  const c = d.counts ?? {}
+  const waiting = (c.queued ?? 0) + (c.fetching ?? 0)
+  const audio = (c.whisper ?? 0) + (c.transcribing ?? 0)
+  return (
+    <section className="mt-10">
+      <h2 className="text-lg font-semibold">Transcripts</h2>
+      {!d.enabled ? (
+        <p className="text-sm text-muted">
+          Off. Add the Lectern service to your compose file and set <code>EDUNEST_AI_URL</code> and <code>EDUNEST_AI_KEY</code> to get transcripts and subtitles for every video.
+        </p>
+      ) : d.error ? (
+        <p className="text-sm text-red-400">The transcript service isn't reachable: {d.error}</p>
+      ) : (
+        <div className="mt-2 space-y-1 text-sm text-muted">
+          <p>
+            <span className="text-white">{c.done ?? 0}</span> ready
+            {d.sources && ` (${d.sources.file ?? 0} from subtitle files, ${d.sources.youtube ?? 0} from YouTube, ${d.sources.whisper ?? 0} from audio)`}
+            {` · ${waiting} looking for subtitles · ${audio} to transcribe from audio · ${c.failed ?? 0} without a transcript`}
+          </p>
+          {d.transcribing && (
+            <p>Transcribing now: {d.transcribing.path.split('/').pop()} ({Math.round((d.transcribing.progress ?? 0) * 100)}%)</p>
+          )}
+          {d.youtube?.blocked_until && (
+            <p className="text-amber-300">
+              YouTube asked us to slow down, so YouTube requests are paused until {new Date(d.youtube.blocked_until * 1000).toLocaleString()}.
+            </p>
+          )}
+          <p className="text-xs">
+            YouTube captions {d.youtube?.enabled ? 'on' : 'off'}
+            {d.youtube?.enabled && `, name search ${d.youtube.name_search ? 'on' : 'off'}`} · speech-to-text{' '}
+            {d.whisper?.enabled ? `on (${d.whisper.model})` : 'off'}
+          </p>
+        </div>
+      )}
+    </section>
   )
 }
 

@@ -4,7 +4,7 @@ TAG      ?= latest
 PLATFORM ?= linux/amd64
 PORT     ?= 18777
 
-.PHONY: dev-backend dev-frontend sample build build-nas save push run stop
+.PHONY: dev-backend dev-frontend sample build build-nas save push run stop lectern-save
 
 ## Local development (two terminals): backend on :18777, Vite on :5173 (proxies /api)
 dev-backend:
@@ -50,3 +50,12 @@ run: build
 
 stop:
 	docker rm -f edunest-local
+
+## Lectern (transcript service): its own repository, cloned next to this one
+##   git clone git@github.com:vijayliebe/lectern.git ../lectern
+LECTERN_DIR ?= ../lectern
+
+lectern-save:
+	$(MAKE) -C $(LECTERN_DIR) save
+	mv $(LECTERN_DIR)/lectern-$(TAG).tar .
+	@echo "Copy lectern-$(TAG).tar to the NAS and import it in the Docker app."

@@ -7,3 +7,4 @@ sample-media/
 *.tar
 .DS_Store
 sample-media-metube/
+.pytest_cache/

@@ -54,6 +54,10 @@ const Player = forwardRef<PlayerHandle, Props>(function Player(
   const [hover, setHover] = useState<{ x: number; t: number } | null>(null)
   const [idle, setIdle] = useState(false)
   const [speedMenu, setSpeedMenu] = useState(false)
+  const [ccMenu, setCcMenu] = useState(false)
+  // which subtitle track CC shows; remembered by label so it survives lesson changes
+  const [trackLabel, setTrackLabel] = useState(() => localStorage.getItem('edunest.captionTrack') ?? '')
+  const trackIdx = Math.max(0, subtitles.findIndex((s) => s.label === trackLabel))
   const [flash, setFlash] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const idleTimer = useRef<number | undefined>(undefined)
@@ -114,9 +118,9 @@ const Player = forwardRef<PlayerHandle, Props>(function Player(
   useEffect(() => {
     const el = video.current
     if (!el) return
-    for (const tr of Array.from(el.textTracks)) tr.mode = captions && tr === el.textTracks[0] ? 'showing' : 'hidden'
+    Array.from(el.textTracks).forEach((tr, i) => { tr.mode = captions && i === trackIdx ? 'showing' : 'hidden' })
     store.set('captions', captions ? 1 : 0)
-  }, [captions, subtitles, src])
+  }, [captions, subtitles, src, trackIdx])
 
   // ---- Fullscreen
   // 1. Fullscreen API on the whole player (desktop, Android, iPad) — keeps our controls & note button.
@@ -446,13 +450,39 @@ const Player = forwardRef<PlayerHandle, Props>(function Player(
               </button>
             )}
             {subtitles.length > 0 && (
-              <button
-                onClick={() => setCaptions((c) => !c)}
-                title="Subtitles (c)"
-                className={`rounded px-1.5 py-0.5 text-xs font-bold ${captions ? 'bg-white text-black' : 'border border-white/60 text-white'}`}
-              >
-                CC
-              </button>
+              <div className="relative">
+                <button
+                  onClick={() => (subtitles.length > 1 ? setCcMenu((m) => !m) : setCaptions((c) => !c))}
+                  title="Subtitles (c)"
+                  className={`rounded px-1.5 py-0.5 text-xs font-bold ${captions ? 'bg-white text-black' : 'border border-white/60 text-white'}`}
+                >
+                  CC
+                </button>
+                {ccMenu && (
+                  <div className="absolute bottom-9 right-0 z-20 min-w-44 rounded-lg bg-black/95 py-1 shadow-xl ring-1 ring-white/10">
+                    {[{ label: 'Off', i: -1 }, ...subtitles.map((s, i) => ({ label: s.label, i }))].map(({ label, i }) => {
+                      const active = i === -1 ? !captions : captions && i === trackIdx
+                      return (
+                        <button
+                          key={`${i}-${label}`}
+                          onClick={() => {
+                            if (i === -1) setCaptions(false)
+                            else {
+                              setCaptions(true)
+                              setTrackLabel(label)
+                              localStorage.setItem('edunest.captionTrack', label)
+                            }
+                            setCcMenu(false)
+                          }}
+                          className={`block w-full px-4 py-1.5 text-left text-xs hover:bg-white/10 ${active ? 'text-accent-2' : ''}`}
+                        >
+                          {active ? '✓ ' : ''}{label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
             )}
             <div className="relative">
               <button onClick={() => setSpeedMenu((s) => !s)} title="Playback speed (< >)" className="rounded px-2 py-1 font-mono text-xs hover:bg-white/15">

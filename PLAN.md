@@ -22,9 +22,8 @@ A small, self-hosted "Udemy/Coursera for my own video folders". It works like Je
 - A manual **Rescan library** button, plus a scan on startup.
 
 ### Out of scope for now (designed so they can be added later)
-- Transcripts / Whisper
-- AI summary and chatbot
-- Multi-user accounts
+- ~~Transcripts / Whisper~~, ~~AI summary and chatbot~~: now planned, see §11
+- ~~Multi-user accounts~~: done
 - On-the-fly transcoding
 
 ---
@@ -252,3 +251,45 @@ A `Makefile` / `scripts/release.sh` handles build → tag → push (or save to t
 3. Stack: **FastAPI + React**. The alternative is a Node/TypeScript backend.
 4. Image delivery: **Docker Hub/GHCR**, or a tar import.
 5. How are the course folders actually laid out on the NAS (depth, file types)? Look at a sample before writing the scanner.
+
+## 11. AI features: transcripts, subtitles, summaries, notes, chat
+
+Decided on 2026-11-16: cloud LLM (Claude), YouTube name search included, MeTube changed to save info and English captions.
+Target hardware: UGREEN DXP4800 Pro, Intel i3-1315U (6 cores / 8 threads), 8 GB RAM, no GPU.
+
+### 11.1 A separate, reusable service: **Lectern**
+- Its own repository: https://github.com/vijayliebe/lectern (Dockerfile, README, tests). It doesn't import anything from EduNest.
+- Runs as a second container in the same compose project. Its port is **not published**: only EduNest talks to it, over the compose network, with a shared key (`LECTERN_API_KEY`).
+- It has no users or login. EduNest checks the login and the course access first, then forwards the request. Chat history stays in EduNest because it belongs to a user.
+- Both containers mount the video folders read-only **at the same paths**, so a lesson's file path means the same thing to both.
+- API (`/v1`): `POST /videos` (path, title, duration, YouTube id if known; idempotent by path), `GET /videos/{id}`, `GET /videos/{id}/transcript` (JSON or `?format=vtt`), `POST /videos/{id}/retry`, then later `/summary`, `/notes`, `/chat`, `/collections/{id}/chat`.
+
+### 11.2 Transcripts (step 1), first source that works wins
+1. **Subtitle file next to the video** (`.vtt`/`.srt`, including the ones MeTube now saves). Free.
+2. **YouTube captions.** The id comes from `.info.json`, embedded tags, or a **name search** (`ytsearch5:<title>`, accepted only if the duration matches within 2 s and the title is similar). Track choice: manual captions in the video's language → `<lang>-orig` (YouTube's own speech recognition) → manual English. Machine-translated tracks are never requested: YouTube rate-limits them.
+   - Gentle by design: one YouTube request at a time, a random 10–30 s gap between requests, a 1-hour pause (doubling up to 24 h) after `429` or a bot check, and every result is stored so each video is fetched once.
+   - yt-dlp is used (maintained, handles YouTube changes); the image includes `deno`, which yt-dlp now needs for YouTube.
+3. **Speech-to-text on the NAS** with faster-whisper (`small`, int8, 4 threads by default; `large-v3-turbo` for better accuracy). Background queue, one video at a time, at low priority so it doesn't slow the NAS down.
+- Stored as timed segments plus the detected language.
+
+### 11.3 Subtitles and the transcript panel (step 1)
+- EduNest adds the transcript as a subtitle track in the CC menu, labelled with its source ("English · YouTube", "Hindi · auto").
+- A **Transcript** tab on the watch page: follows the video, click a line to jump there, search inside it.
+- **English subtitles for non-English videos** come in step 2: the LLM translates the segments and keeps their timing.
+
+### 11.4 Summary and detailed notes (step 2)
+- Always in English, whatever the video's language: the model reads the original transcript.
+- Summary: TL;DR, key points, section-by-section bullets. Detailed notes: a study guide with headings, explanations, definitions, formulas (LaTeX), review questions; every section starts with a `[mm:ss]` link.
+- Cached per video in Lectern and shared by everyone who can see the course. Generating is admin-only or on first open (setting), so cost stays predictable.
+- "Save to my notes" turns sections into the user's own timestamped notes.
+- Models: a small Claude model for translation and chat, a larger one for detailed notes. API key only in compose.
+
+### 11.5 Chat (step 3)
+- One video: the whole transcript (with timestamps) goes into the prompt; answers cite clickable timestamps. No retrieval needed: a 1-hour lecture is ~15k tokens.
+- A whole course: transcripts are cut into timed chunks, searched with SQLite FTS5 (BM25), top chunks go into the prompt. Embeddings (sqlite-vec) only if keyword search proves too weak.
+- Answers stream (SSE). History is per user, stored in EduNest.
+
+### 11.6 MeTube settings
+`YTDL_OPTIONS={"writeinfojson": true, "writesubtitles": true, "writeautomaticsub": true, "subtitleslangs": ["en-orig"], "subtitlesformat": "vtt"}`
+- `writeinfojson` saves the YouTube id, language, description and chapters: Lectern then never needs a name search for new downloads.
+- Only `en-orig` (the untranslated English track) is requested: a failed subtitle download makes yt-dlp fail the whole video, and translated tracks are the ones YouTube rate-limits. Other languages are fetched later by Lectern, slowly.

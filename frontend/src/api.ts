@@ -60,6 +60,36 @@ export interface Subtitle {
   url: string
 }
 
+export type TranscriptStatus = 'queued' | 'fetching' | 'whisper' | 'transcribing' | 'done' | 'failed' | 'unavailable'
+
+export interface TranscriptSegment {
+  start: number
+  end: number
+  text: string
+}
+
+export interface Transcript {
+  enabled: boolean
+  status?: TranscriptStatus
+  progress?: number | null
+  source?: 'file' | 'youtube' | 'whisper' | null
+  source_detail?: string | null
+  language?: string | null
+  error?: string | null
+  next_try_at?: string | null
+  segments: TranscriptSegment[]
+}
+
+export interface TranscriptsStatus {
+  enabled: boolean
+  error?: string
+  counts?: Partial<Record<TranscriptStatus, number>>
+  sources?: Partial<Record<'file' | 'youtube' | 'whisper', number>>
+  transcribing?: { id: number; path: string; progress: number | null } | null
+  youtube?: { enabled: boolean; name_search: boolean; blocked_until: number | null; backoff_level: number }
+  whisper?: { enabled: boolean; model: string }
+}
+
 export interface LessonDetail {
   id: number
   title: string
@@ -250,7 +280,13 @@ export const api = {
   course: (id: number) => req<CourseDetail>(`/api/courses/${id}`),
   courseNotes: (id: number) => req<CourseNote[]>(`/api/courses/${id}/notes`),
   lesson: (id: number) => req<LessonDetail>(`/api/lessons/${id}`),
+  transcript: (lessonId: number) => req<Transcript>(`/api/lessons/${lessonId}/transcript`),
+  retryTranscript: (lessonId: number, whisper = false) =>
+    req<Transcript>(`/api/admin/transcripts/${lessonId}/retry?whisper=${whisper}`, { method: 'POST' }),
+  transcriptsStatus: () => req<TranscriptsStatus>('/api/admin/transcripts/status'),
   continueWatching: () => req<ContinueItem[]>('/api/continue-watching'),
+  hideContinue: (courseId: number) => req<void>(`/api/continue-watching/${courseId}`, { method: 'DELETE' }),
+  clearContinue: () => req<void>('/api/continue-watching', { method: 'DELETE' }),
   saveProgress: (id: number, position_s: number, completed?: boolean) =>
     req<{ completed: boolean }>(`/api/progress/${id}`, json('PUT', { position_s, completed })),
 

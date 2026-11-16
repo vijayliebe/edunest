@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { api, type LessonDetail, type Note } from '../api'
+import { api, type LessonDetail, type Note, type Subtitle } from '../api'
+import { useAuth } from '../auth'
 import Curriculum from '../components/Curriculum'
 import { NoteEditor, NotesList } from '../components/Notes'
 import Player, { type PlayerHandle } from '../components/Player'
+import TranscriptPanel, { isPending, languageName, transcriptLabel } from '../components/Transcript'
 import { fmtTime, useLoad } from '../util'
 
-type Tab = 'notes' | 'contents' | 'chapters'
+type Tab = 'notes' | 'contents' | 'chapters' | 'transcript'
 const SAVE_EVERY_S = 10
 
 export default function Watch() {
@@ -23,6 +25,17 @@ export default function Watch() {
   const course = useLoad(() => (courseId ? api.course(courseId) : Promise.resolve(null)), [courseId, courseVersion])
 
   const [tab, setTab] = useState<Tab>('notes')
+  const { user } = useAuth()
+
+  // ---- transcript (only when the transcript service is configured)
+  const transcript = useLoad(() => api.transcript(id), [id])
+  const tr = transcript.data
+  const trPending = isPending(tr)
+  useEffect(() => {
+    if (!trPending) return
+    const h = window.setInterval(() => void transcript.reload(), 10_000)
+    return () => window.clearInterval(h)
+  }, [trPending, transcript.reload])
   const [time, setTime] = useState(0)
   const [composing, setComposing] = useState<{ ts: number; resume: boolean } | null>(null)
   const [countdown, setCountdown] = useState<number | null>(null)
@@ -30,6 +43,16 @@ export default function Watch() {
   const [showDesc, setShowDesc] = useState(false)
 
   const l = lesson.data?.id === id ? lesson.data : null
+
+  // subtitle files next to the video, plus the transcript as an extra CC track (unless it IS one of those files)
+  const subtitles = useMemo<Subtitle[]>(() => {
+    // "en", "en-orig", "pt-BR" -> "English", "English", "Portuguese (Brazil)"; anything else stays as it is
+    const list = (l?.subtitles ?? []).map((sub) =>
+      /^[a-z]{2,3}(-[A-Za-z0-9]+)*$/.test(sub.label) ? { ...sub, label: languageName(sub.label.replace(/-orig$/, '')) } : sub,
+    )
+    if (!l || !tr?.enabled || tr.status !== 'done' || tr.source === 'file') return list
+    return [...list, { index: -1, label: transcriptLabel(tr), lang: tr.language ?? 'und', url: `/api/lessons/${l.id}/transcript.vtt` }]
+  }, [l, tr])
 
   // ---- progress tracking
   const lastSaved = useRef({ t: -1, id })
@@ -169,7 +192,7 @@ export default function Watch() {
             durationHint={l.duration_s}
             chapters={l.chapters}
             notes={sortedNotes}
-            subtitles={l.subtitles}
+            subtitles={subtitles}
             onTime={(t) => {
               setTime(t)
               curT.current = t
@@ -280,6 +303,7 @@ export default function Watch() {
           <TabBtn active={tab === 'notes'} onClick={() => setTab('notes')}>Notes ({sortedNotes.length})</TabBtn>
           <TabBtn active={tab === 'contents'} onClick={() => setTab('contents')}>Course content</TabBtn>
           {l.chapters.length > 0 && <TabBtn active={tab === 'chapters'} onClick={() => setTab('chapters')}>Chapters</TabBtn>}
+          {tr?.enabled && <TabBtn active={tab === 'transcript'} onClick={() => setTab('transcript')}>Transcript</TabBtn>}
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto">
           {tab === 'notes' && (
@@ -300,6 +324,18 @@ export default function Watch() {
           )}
           {tab === 'contents' && (course.data ? <Curriculum sections={course.data.sections} currentId={l.id} compact /> : <p className="p-4 text-muted">Loading…</p>)}
           {tab === 'chapters' && <Chapters lesson={l} time={time} onSeek={seekTo} />}
+          {tab === 'transcript' && tr?.enabled && (
+            <TranscriptPanel
+              t={tr}
+              time={time}
+              onSeek={seekTo}
+              isAdmin={!!user?.is_admin}
+              onRetry={async (whisper) => {
+                await api.retryTranscript(l.id, whisper)
+                await transcript.reload()
+              }}
+            />
+          )}
         </div>
       </aside>
     </div>

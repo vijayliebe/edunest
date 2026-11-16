@@ -11,7 +11,7 @@ from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import access, auth, media, scanner, security
+from . import access, ai, auth, media, scanner, security
 from .config import (BROWSE_ROOT, BROWSE_START, COMPLETE_RATIO, DATA_DIR, SCAN_INTERVAL_MIN, SCAN_ON_STARTUP, SEED_LIBRARIES, STATIC_DIR,
                      SUBTITLE_EXTS, THUMBS_DIR)
 from .db import get_conn, migrate, row, rows, seed_libraries, transaction
@@ -511,6 +511,68 @@ def lesson_subtitle(lesson_id: int, index: int, request: Request):
     return PlainTextResponse(text, media_type="text/vtt")
 
 
+# ---------------------------------------------------------------- transcripts (optional Lectern service)
+
+TRANSCRIPT_FIELDS = ("status", "progress", "source", "source_detail", "language", "error", "next_try_at")
+
+
+@app.get("/api/lessons/{lesson_id}/transcript")
+def lesson_transcript(lesson_id: int, request: Request):
+    """Transcript status, plus the segments once it's ready. Opening a lesson moves it to the front of the queue."""
+    user, l = access.require_lesson(request, lesson_id)
+    if not ai.enabled():
+        return {"enabled": False}
+    try:
+        v = ai.register(l, priority=1)
+        out = {"enabled": True, **{k: v.get(k) for k in TRANSCRIPT_FIELDS}, "segments": []}
+        if v["status"] == "done":
+            out["segments"] = ai.call("GET", f"/v1/videos/{v['id']}/transcript", timeout=15)["segments"]
+    except ai.Unavailable as e:
+        log.warning("transcript for lesson %s: %s", lesson_id, e)
+        return {"enabled": True, "status": "unavailable", "segments": []}
+    if not user.is_admin and out.get("source_detail") and out["source"] != "whisper":
+        out["source_detail"] = None  # file names are for admins
+    return out
+
+
+@app.get("/api/lessons/{lesson_id}/transcript.vtt")
+def lesson_transcript_vtt(lesson_id: int, request: Request):
+    _, l = access.require_lesson(request, lesson_id)
+    if not ai.enabled():
+        raise HTTPException(404)
+    try:
+        v = ai.register(l)
+        if v["status"] != "done":
+            raise HTTPException(404, "transcript not ready")
+        text = ai.call("GET", f"/v1/videos/{v['id']}/transcript?format=vtt", timeout=15, raw=True)
+    except ai.Unavailable:
+        raise HTTPException(503, "transcript service unavailable") from None
+    return PlainTextResponse(text, media_type="text/vtt", headers={"Cache-Control": "private, no-store"})
+
+
+@app.post("/api/admin/transcripts/{lesson_id}/retry")
+def retry_transcript(lesson_id: int, request: Request, whisper: bool = False):
+    _, l = access.require_lesson(request, lesson_id)
+    if not ai.enabled():
+        raise HTTPException(404)
+    try:
+        v = ai.register(l, priority=1)
+        v = ai.call("POST", f"/v1/videos/{v['id']}/retry?whisper={'true' if whisper else 'false'}")
+    except ai.Unavailable as e:
+        raise HTTPException(409 if str(e).startswith("409") else 503, str(e)) from None
+    return {k: v.get(k) for k in TRANSCRIPT_FIELDS}
+
+
+@app.get("/api/admin/transcripts/status")
+def transcripts_status():
+    if not ai.enabled():
+        return {"enabled": False}
+    try:
+        return {"enabled": True, **ai.call("GET", "/v1/stats")}
+    except ai.Unavailable as e:
+        return {"enabled": True, "error": str(e)}
+
+
 # ---------------------------------------------------------------- thumbnails
 
 def _lesson_thumb_response(l: dict):
@@ -592,11 +654,15 @@ def continue_watching(request: Request, limit: int = 12):
                                     JOIN lesson l2 ON l2.id = p2.lesson_id
                                     WHERE l2.course_id = l.course_id AND p2.username = p.username)
            ORDER BY p.last_watched_at DESC""", (user.username, *params)))
+    hidden = {r[0]: r[1] for r in conn.execute(
+        "SELECT course_id, hidden_at FROM continue_hidden WHERE username=?", (user.username,))}
     out, seen = [], set()
     for r in recent:
         if r["course_id"] in seen:
             continue
         seen.add(r["course_id"])
+        if r["course_id"] in hidden and r["last_watched_at"] <= hidden[r["course_id"]]:
+            continue  # removed from the list and not watched since
         order = ordered_lessons(r["course_id"], user.username)
         idx = next((i for i, x in enumerate(order) if x["id"] == r["lesson_id"]), None)
         if idx is None:
@@ -616,6 +682,30 @@ def continue_watching(request: Request, limit: int = 12):
         if len(out) >= limit:
             break
     return out
+
+
+@app.delete("/api/continue-watching/{course_id}", status_code=204)
+def hide_continue_watching(course_id: int, request: Request):
+    """Remove one course from the user's Continue watching row (progress is kept)."""
+    user = access.require_course(request, course_id)
+    with transaction() as c:
+        c.execute("""INSERT INTO continue_hidden (username, course_id, hidden_at) VALUES (?, ?, datetime('now'))
+                     ON CONFLICT(username, course_id) DO UPDATE SET hidden_at=excluded.hidden_at""",
+                  (user.username, course_id))
+    return Response(status_code=204)
+
+
+@app.delete("/api/continue-watching", status_code=204)
+def clear_continue_watching(request: Request):
+    """Clear the user's whole Continue watching row (progress is kept)."""
+    user = access.current_user(request)
+    with transaction() as c:
+        c.execute("""INSERT INTO continue_hidden (username, course_id, hidden_at)
+                     SELECT DISTINCT ?, l.course_id, datetime('now')
+                     FROM progress p JOIN lesson l ON l.id = p.lesson_id WHERE p.username = ?
+                     ON CONFLICT(username, course_id) DO UPDATE SET hidden_at=excluded.hidden_at""",
+                  (user.username, user.username))
+    return Response(status_code=204)
 
 
 # ---------------------------------------------------------------- notes (per user)

@@ -4,9 +4,10 @@ An open-source, self-hosted learning app for your NAS or home server. It turns f
 
 - Folders become courses, sub-folders become sections, and videos become lessons. Sorting is natural, so `2` comes before `10`.
 - **Notes:** press `N` and the video pauses at the current moment. Notes are written in Markdown and support LaTeX math. They appear as markers on the seek bar, and clicking one jumps to that moment. Each course has an "All notes" page, notes are full-text searchable, and they export to Markdown with deep links.
-- **Progress:** each lesson resumes where you left off and is auto-completed at 90% watched. The home page has a *Continue watching* row.
+- **Progress:** each lesson resumes where you left off and is auto-completed at 90% watched. The home page has a *Continue watching* row; remove a course from it with the × on its card, or empty it with *Clear all*. Your progress is kept, and a course comes back once you watch it again.
 - **Metadata:** read from yt-dlp `.info.json` files, embedded tags, or the filename. That includes YouTube **chapters**, which show on the seek bar. Thumbnails come from sidecar images, embedded covers, or an auto-generated frame.
 - `.srt` and `.vtt` subtitles next to a video are picked up automatically.
+- **Transcripts and subtitles** for every video (optional): a searchable *Transcript* tab that follows the video, and an extra track in the CC menu. They come from subtitle files, YouTube captions, or speech-to-text on the NAS. See [Transcripts](#transcripts-optional).
 - **Multiple library folders** are managed in **Settings**. Each one is either a *folder of courses* or a *single course*.
 - Renamed or moved files keep their notes and progress, because files are matched by fingerprint.
 - Video folders are mounted read-only, so the app never writes to them.
@@ -55,6 +56,29 @@ To get the best metadata for YouTube downloads, use yt-dlp with:
 yt-dlp --write-info-json --write-thumbnail --embed-chapters --embed-metadata <url>
 ```
 
+## Transcripts (optional)
+
+Transcripts are made by **[Lectern](https://github.com/vijayliebe/lectern)**, a separate open-source service that runs as a second container in the same compose project. It tries, in order:
+1. a subtitle file next to the video,
+2. YouTube captions: the YouTube id comes from the `.info.json` file, or from a search by title that only accepts a video of the same length,
+3. speech-to-text on the NAS (faster-whisper), for everything else. On an Intel i3 this takes very roughly as long as the video itself with the `small` model, so it runs slowly in the background, one video at a time.
+
+YouTube is asked carefully: one request at a time, 10–30 s apart, with a pause of an hour or more if YouTube ever pushes back. Each video is fetched only once.
+
+**To turn it on**
+1. Build and import the Lectern image too: `git clone git@github.com:vijayliebe/lectern.git ../lectern`, then `make lectern-save` → `lectern-latest.tar`.
+2. Use the `lectern` service from [docker-compose.yml](docker-compose.yml). Mount the **same folders at the same paths** as in EduNest, and set the same random key in `LECTERN_API_KEY` and `EDUNEST_AI_KEY` (`openssl rand -hex 24`).
+3. After the next scan, every video is queued. **Settings → Transcripts** shows progress. On the watch page, admins can ask for a video to be looked up again or transcribed from its audio.
+
+**MeTube settings, recommended:** add these options to MeTube's `YTDL_OPTIONS` so new downloads come with their YouTube id and English captions, and no YouTube lookups are needed later. Keep any options you already have in the same JSON object, e.g. with a cookie file:
+```yaml
+    environment:
+      YTDL_OPTIONS: '{"cookiefile": "/cookies/cookies.txt", "writeinfojson": true, "writesubtitles": true, "writeautomaticsub": true, "subtitleslangs": ["en-orig"], "subtitlesformat": "vtt"}'
+```
+Only the untranslated English track (`en-orig`) is requested on purpose. A failed subtitle download makes yt-dlp fail the whole video, and translated tracks are what YouTube rate-limits. Captions for other languages are fetched later by Lectern, one at a time.
+
+**YouTube cookies (optional):** if Settings → Transcripts says YouTube keeps pausing Lectern, mount MeTube's cookie folder into Lectern read-only and set `LECTERN_YT_COOKIES` (see the commented lines in the compose file). Lectern uses its own copy, because yt-dlp rewrites the cookie file after every use. Requests are then tied to that Google account, which is why it's off by default.
+
 ## Login and security
 
 Everything requires a login: pages show only the sign-in screen, and every API call, video stream, thumbnail and subtitle answers `401` without a valid session.
@@ -87,6 +111,8 @@ Everything requires a login: pages show only the sign-in screen, and every API c
 | `EDUNEST_COOKIE_SECURE` | `auto` | `auto` = Secure cookie when the request arrived over HTTPS; `true` forces it |
 | `EDUNEST_TRUSTED_PROXIES` | private ranges | Reverse proxies allowed to set `X-Forwarded-For` (comma-separated IPs/CIDRs) |
 | `EDUNEST_LIBRARIES` | *(every mounted folder)* | Library folders to create on **first start**, separated by `;`. After that, manage them in Settings. |
+| `EDUNEST_AI_URL` | — | Address of the Lectern service, e.g. `http://lectern:8000`. Unset = no transcripts. |
+| `EDUNEST_AI_KEY` | — | Same value as Lectern's `LECTERN_API_KEY` |
 | `EDUNEST_BROWSE_START` | `/media` | Folder the Settings folder picker opens at |
 | `PUID` / `PGID` | `1000` | User and group that own the files in `/data` |
 | `PORT` | `8080` | Port inside the container |

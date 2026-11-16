@@ -177,6 +177,20 @@ MIGRATIONS: list[str] = [
         created_by     TEXT
     );
     """,
+    # v4 — courses a user removed from "Continue watching". Watching that course again
+    # (a newer progress.last_watched_at) brings it back. Progress itself is untouched.
+    """
+    CREATE TABLE continue_hidden (
+        username   TEXT NOT NULL,
+        course_id  INTEGER NOT NULL REFERENCES course(id) ON DELETE CASCADE,
+        hidden_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (username, course_id)
+    );
+    """,
+    # v5 — which lessons have been handed to the transcript service, and for which version of the file
+    """
+    ALTER TABLE lesson ADD COLUMN ai_fp TEXT;
+    """,
 ]
 
 

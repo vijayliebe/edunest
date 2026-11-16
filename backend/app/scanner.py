@@ -267,6 +267,8 @@ def scan(force: bool = False) -> None:
         status.update(running=True, errors=[], processed=0, total=0, added=0, updated=0, relinked=0, missing=0,
                       error=None, started_at=_now(), finished_at=None)
         _scan(force)
+        from . import ai  # hand new lessons to the transcript service, if one is configured
+        ai.sync_in_background()
     except Exception as e:  # noqa: BLE001
         log.exception("scan failed")
         status["error"] = str(e)
