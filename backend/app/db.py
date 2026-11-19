@@ -191,6 +191,21 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE lesson ADD COLUMN ai_fp TEXT;
     """,
+    # v6 — chat with a video. Private to each user, like notes.
+    """
+    CREATE TABLE chat_message (
+        id          INTEGER PRIMARY KEY,
+        username    TEXT NOT NULL,
+        lesson_id   INTEGER NOT NULL REFERENCES lesson(id) ON DELETE CASCADE,
+        role        TEXT NOT NULL,           -- user | assistant
+        content     TEXT NOT NULL,
+        at_s        REAL,                    -- where the user was in the video when asking
+        model       TEXT,
+        created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX chat_user_lesson ON chat_message(username, lesson_id, id);
+    CREATE INDEX chat_user_time ON chat_message(username, created_at);
+    """,
 ]
 
 

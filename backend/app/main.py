@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 import threading
@@ -6,13 +7,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response,
+                               StreamingResponse)
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import MutableHeaders
 from pydantic import BaseModel, Field
 
 from . import access, ai, auth, media, scanner, security
-from .config import (BROWSE_ROOT, BROWSE_START, COMPLETE_RATIO, DATA_DIR, SCAN_INTERVAL_MIN, SCAN_ON_STARTUP, SEED_LIBRARIES, STATIC_DIR,
+from .config import (AI_CHAT, AI_CHAT_PER_HOUR, AI_GENERATE, BROWSE_ROOT, BROWSE_START, COMPLETE_RATIO, DATA_DIR, SCAN_INTERVAL_MIN, SCAN_ON_STARTUP, SEED_LIBRARIES, STATIC_DIR,
                      SUBTITLE_EXTS, THUMBS_DIR)
 from .db import get_conn, migrate, row, rows, seed_libraries, transaction
 
@@ -90,16 +94,14 @@ def _deny(status: int, detail: str) -> JSONResponse:
     return JSONResponse({"detail": detail}, status_code=status, headers={"Cache-Control": "no-store"})
 
 
-@app.middleware("http")
-async def access_guard(request: Request, call_next):
+def _guard(request: Request) -> JSONResponse | None:
+    """Default-deny check for one request. Returns a denial, or None to let it through
+    (with request.state.user set for /api). Runs in a worker thread: it touches the database."""
     path, method = request.url.path, request.method
-    is_api = path == "/api" or path.startswith("/api/")
-
     if method in STATE_CHANGING and not _same_origin(request):
         security.record("bad_origin", client_ip(request), path=path)
         return _deny(403, "Cross-site request blocked")
-
-    if is_api:
+    if path == "/api" or path.startswith("/api/"):
         key = ("GET" if method == "HEAD" else method, path)
         if key not in PUBLIC_API:
             user = auth.session_user(request.cookies.get(auth.SESSION_COOKIE))
@@ -112,19 +114,46 @@ async def access_guard(request: Request, call_next):
             request.state.user = user
     elif method not in ("GET", "HEAD"):
         return _deny(405, "Method not allowed")
+    return None
 
-    response = await call_next(request)
-    h = response.headers
-    h.setdefault("X-Content-Type-Options", "nosniff")
-    h.setdefault("X-Frame-Options", "DENY")
-    h.setdefault("Referrer-Policy", "same-origin")
-    h.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-    h.setdefault("Content-Security-Policy", CSP)
-    if request.url.scheme == "https":
-        h.setdefault("Strict-Transport-Security", "max-age=31536000")
-    if is_api:
-        h.setdefault("Cache-Control", "private, no-store")
-    return response
+
+class AccessGuard:
+    """Plain ASGI middleware (not @app.middleware): response bodies such as video streams go straight
+    to the client instead of through an extra queue, and the database work for the login check runs in
+    a worker thread, so it never pauses the event loop that is sending video to everyone."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        request = Request(scope)
+        denied = await run_in_threadpool(_guard, request)
+        if denied is not None:
+            return await denied(scope, receive, send)
+        is_api = request.url.path == "/api" or request.url.path.startswith("/api/")
+        https = request.url.scheme == "https"
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                h = MutableHeaders(scope=message)
+                for k, v in (("X-Content-Type-Options", "nosniff"), ("X-Frame-Options", "DENY"),
+                             ("Referrer-Policy", "same-origin"),
+                             ("Permissions-Policy", "camera=(), microphone=(), geolocation=()"),
+                             ("Content-Security-Policy", CSP)):
+                    if k not in h:
+                        h[k] = v
+                if https and "Strict-Transport-Security" not in h:
+                    h["Strict-Transport-Security"] = "max-age=31536000"
+                if is_api and "Cache-Control" not in h:
+                    h["Cache-Control"] = "private, no-store"
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
+app.add_middleware(AccessGuard)
 
 
 # ---------------------------------------------------------------- auth endpoints
@@ -490,13 +519,19 @@ def lesson_detail(lesson_id: int, request: Request):
     }
 
 
+class VideoFileResponse(FileResponse):
+    # 1 MiB pieces instead of Starlette's 64 KiB: 16x fewer disk reads and thread hops per second of
+    # video, which matters on a NAS CPU and over slow, high-latency internet connections.
+    chunk_size = 1024 * 1024
+
+
 @app.get("/api/lessons/{lesson_id}/stream")
 def lesson_stream(lesson_id: int, request: Request):
     _, l = access.require_lesson(request, lesson_id)
     p = media_path(l["path"])
     # Starlette's FileResponse handles HTTP Range requests, so seeking is instant.
-    return FileResponse(p, media_type=MIME.get(p.suffix.lower(), "application/octet-stream"),
-                        content_disposition_type="inline", headers={"Cache-Control": "private, no-store"})
+    return VideoFileResponse(p, media_type=MIME.get(p.suffix.lower(), "application/octet-stream"),
+                             content_disposition_type="inline", headers={"Cache-Control": "private, no-store"})
 
 
 @app.get("/api/lessons/{lesson_id}/subtitles/{index}")
@@ -517,7 +552,7 @@ TRANSCRIPT_FIELDS = ("status", "progress", "source", "source_detail", "language"
 
 
 @app.get("/api/lessons/{lesson_id}/transcript")
-def lesson_transcript(lesson_id: int, request: Request):
+def lesson_transcript(lesson_id: int, request: Request, lang: str | None = None):
     """Transcript status, plus the segments once it's ready. Opening a lesson moves it to the front of the queue."""
     user, l = access.require_lesson(request, lesson_id)
     if not ai.enabled():
@@ -526,17 +561,25 @@ def lesson_transcript(lesson_id: int, request: Request):
         v = ai.register(l, priority=1)
         out = {"enabled": True, **{k: v.get(k) for k in TRANSCRIPT_FIELDS}, "segments": []}
         if v["status"] == "done":
-            out["segments"] = ai.call("GET", f"/v1/videos/{v['id']}/transcript", timeout=15)["segments"]
+            q = "?lang=en" if lang == "en" else ""
+            out["segments"] = ai.call("GET", f"/v1/videos/{v['id']}/transcript{q}", timeout=15)["segments"]
     except ai.Unavailable as e:
         log.warning("transcript for lesson %s: %s", lesson_id, e)
         return {"enabled": True, "status": "unavailable", "segments": []}
     if not user.is_admin and out.get("source_detail") and out["source"] != "whisper":
         out["source_detail"] = None  # file names are for admins
+    if out["status"] == "done" and (out.get("language") or "en").split("-")[0] != "en":
+        try:
+            t = ai.call("GET", f"/v1/videos/{v['id']}/translation")
+            out["translation"] = {k: t.get(k) for k in ("enabled", "status", "error")}
+            out["can_generate"] = AI_GENERATE != "admins" or user.is_admin
+        except ai.Unavailable:
+            pass
     return out
 
 
 @app.get("/api/lessons/{lesson_id}/transcript.vtt")
-def lesson_transcript_vtt(lesson_id: int, request: Request):
+def lesson_transcript_vtt(lesson_id: int, request: Request, lang: str | None = None):
     _, l = access.require_lesson(request, lesson_id)
     if not ai.enabled():
         raise HTTPException(404)
@@ -544,10 +587,163 @@ def lesson_transcript_vtt(lesson_id: int, request: Request):
         v = ai.register(l)
         if v["status"] != "done":
             raise HTTPException(404, "transcript not ready")
-        text = ai.call("GET", f"/v1/videos/{v['id']}/transcript?format=vtt", timeout=15, raw=True)
+        q = "&lang=en" if lang == "en" else ""
+        text = ai.call("GET", f"/v1/videos/{v['id']}/transcript?format=vtt{q}", timeout=15, raw=True)
     except ai.Unavailable:
         raise HTTPException(503, "transcript service unavailable") from None
     return PlainTextResponse(text, media_type="text/vtt", headers={"Cache-Control": "private, no-store"})
+
+
+# ---------------------------------------------------------------- chat with a video
+
+class ChatIn(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    at: float | None = Field(default=None, ge=0)  # playback position when asking
+
+
+def _chat_allowed(user) -> bool:
+    return AI_CHAT == "everyone" or (AI_CHAT == "admins" and user.is_admin)
+
+
+def _chat_history(username: str, lesson_id: int) -> list[dict]:
+    return rows(get_conn().execute(
+        "SELECT id, role, content, at_s, created_at FROM chat_message WHERE username=? AND lesson_id=? ORDER BY id",
+        (username, lesson_id)))
+
+
+@app.get("/api/lessons/{lesson_id}/chat")
+def lesson_chat(lesson_id: int, request: Request):
+    """The user's own conversation about this lesson, and whether they can chat."""
+    user, l = access.require_lesson(request, lesson_id)
+    out = {"enabled": False, "can_chat": _chat_allowed(user), "transcript_ready": False,
+           "messages": _chat_history(user.username, lesson_id)}
+    if not ai.enabled():
+        return out
+    try:
+        v = ai.register(l)
+        out["transcript_ready"] = v["status"] == "done"
+        out["enabled"] = bool(ai.call("GET", f"/v1/videos/{v['id']}/summary").get("enabled"))  # LLM configured?
+    except ai.Unavailable as e:
+        log.warning("chat for lesson %s: %s", lesson_id, e)
+    return out
+
+
+@app.post("/api/lessons/{lesson_id}/chat")
+def lesson_chat_ask(lesson_id: int, body: ChatIn, request: Request):
+    """Ask a question about the video. The answer streams back as server-sent events
+    ({"delta"}, then {"done"} or {"error"}); question and answer are saved only when it succeeds."""
+    user, l = access.require_lesson(request, lesson_id)
+    if not ai.enabled():
+        raise HTTPException(404)
+    if not _chat_allowed(user):
+        raise HTTPException(403, "Chat is not available for your account")
+    conn = get_conn()
+    if not user.is_admin:
+        n = conn.execute("SELECT COUNT(*) FROM chat_message WHERE username=? AND role='user' "
+                         "AND created_at > datetime('now', '-1 hour')", (user.username,)).fetchone()[0]
+        if n >= AI_CHAT_PER_HOUR:
+            raise HTTPException(429, f"You've asked {n} questions in the last hour. Please wait a little.")
+    history = _chat_history(user.username, lesson_id)
+    conversation = [{"role": m["role"], "content": m["content"]} for m in history] + \
+                   [{"role": "user", "content": body.message}]
+    try:
+        v = ai.register(l, priority=1)
+        events = ai.stream(f"/v1/videos/{v['id']}/chat", {"messages": conversation, "at": body.at})
+        first = next(events, None)  # surface "not ready / off" as a normal HTTP error, before streaming starts
+    except ai.Unavailable as e:
+        if e.status in (409, 503):
+            raise HTTPException(409, e.detail) from None
+        raise HTTPException(503, "transcript service unavailable") from None
+    username = user.username
+
+    def relay():
+        answer, outcome = [], None
+        try:
+            stream_events = iter([first] if first is not None else [])
+            for ev in _chain(stream_events, events):
+                if "delta" in ev:
+                    answer.append(ev["delta"])
+                elif "done" in ev or "error" in ev:
+                    outcome = ev
+                yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+        except ai.Unavailable as e:
+            outcome = {"error": f"transcript service: {e.detail}"}
+            yield f"data: {json.dumps(outcome)}\n\n"
+        if outcome and outcome.get("done") and "".join(answer).strip():
+            with transaction() as c:
+                c.execute("INSERT INTO chat_message (username, lesson_id, role, content, at_s) VALUES (?,?,?,?,?)",
+                          (username, lesson_id, "user", body.message, body.at))
+                c.execute("INSERT INTO chat_message (username, lesson_id, role, content, model) VALUES (?,?,?,?,?)",
+                          (username, lesson_id, "assistant", "".join(answer), outcome.get("model")))
+        elif outcome is None:
+            yield f"data: {json.dumps({'error': 'The answer stopped unexpectedly; please ask again'})}\n\n"
+
+    return StreamingResponse(relay(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _chain(*its):
+    for it in its:
+        yield from it
+
+
+@app.delete("/api/lessons/{lesson_id}/chat", status_code=204)
+def lesson_chat_clear(lesson_id: int, request: Request):
+    user, _ = access.require_lesson(request, lesson_id)
+    with transaction() as c:
+        c.execute("DELETE FROM chat_message WHERE username=? AND lesson_id=?", (user.username, lesson_id))
+    return Response(status_code=204)
+
+
+AI_KINDS = ("summary", "notes", "translation")
+AI_FIELDS = ("enabled", "status", "content", "model", "error", "updated_at")
+
+
+def _ai_out(user, r: dict) -> dict:
+    out = {k: r.get(k) for k in AI_FIELDS}
+    if user.is_admin:
+        out.update(input_tokens=r.get("input_tokens"), output_tokens=r.get("output_tokens"))
+    out["can_generate"] = AI_GENERATE != "admins" or user.is_admin
+    out["can_regenerate"] = user.is_admin
+    return out
+
+
+@app.get("/api/lessons/{lesson_id}/ai/{kind}")
+def lesson_ai(lesson_id: int, kind: str, request: Request):
+    """Summary, study notes or translation status of a lesson (and the text once it's made)."""
+    user, l = access.require_lesson(request, lesson_id)
+    if kind not in AI_KINDS:
+        raise HTTPException(404)
+    if not ai.enabled():
+        return {"enabled": False, "status": "none"}
+    try:
+        v = ai.register(l)
+        r = ai.call("GET", f"/v1/videos/{v['id']}/{kind}", timeout=15)
+    except ai.Unavailable as e:
+        log.warning("%s for lesson %s: %s", kind, lesson_id, e)
+        return {"enabled": True, "status": "unavailable"}
+    return _ai_out(user, r)
+
+
+@app.post("/api/lessons/{lesson_id}/ai/{kind}")
+def lesson_ai_generate(lesson_id: int, kind: str, request: Request, again: bool = False):
+    """Ask for a summary, study notes or an English translation. Made once per video, shared by everyone
+    who can see the course. Making it again (`again`) is for admins only."""
+    user, l = access.require_lesson(request, lesson_id)
+    if kind not in AI_KINDS:
+        raise HTTPException(404)
+    if not ai.enabled():
+        raise HTTPException(404)
+    if (again or AI_GENERATE == "admins") and not user.is_admin:
+        raise HTTPException(403, "Only an admin can do that")
+    try:
+        v = ai.register(l, priority=1)
+        r = ai.call("POST", f"/v1/videos/{v['id']}/{kind}?again={'true' if again else 'false'}")
+    except ai.Unavailable as e:
+        if e.status in (409, 503):  # transcript not ready yet / no API key configured
+            raise HTTPException(409, e.detail) from None
+        raise HTTPException(503, "transcript service unavailable") from None
+    return _ai_out(user, r)
 
 
 @app.post("/api/admin/transcripts/{lesson_id}/retry")
@@ -559,7 +755,7 @@ def retry_transcript(lesson_id: int, request: Request, whisper: bool = False):
         v = ai.register(l, priority=1)
         v = ai.call("POST", f"/v1/videos/{v['id']}/retry?whisper={'true' if whisper else 'false'}")
     except ai.Unavailable as e:
-        raise HTTPException(409 if str(e).startswith("409") else 503, str(e)) from None
+        raise HTTPException(409 if e.status == 409 else 503, e.detail) from None
     return {k: v.get(k) for k in TRANSCRIPT_FIELDS}
 
 

@@ -275,16 +275,16 @@ Target hardware: UGREEN DXP4800 Pro, Intel i3-1315U (6 cores / 8 threads), 8 GB 
 ### 11.3 Subtitles and the transcript panel (step 1)
 - EduNest adds the transcript as a subtitle track in the CC menu, labelled with its source ("English · YouTube", "Hindi · auto").
 - A **Transcript** tab on the watch page: follows the video, click a line to jump there, search inside it.
-- **English subtitles for non-English videos** come in step 2: the LLM translates the segments and keeps their timing.
+- **English subtitles for non-English videos** (step 2, ✅ built): the LLM translates the segments in numbered batches and keeps their timing.
 
-### 11.4 Summary and detailed notes (step 2)
+### 11.4 Summary and detailed notes (step 2) ✅ built 2026-11-18
 - Always in English, whatever the video's language: the model reads the original transcript.
 - Summary: TL;DR, key points, section-by-section bullets. Detailed notes: a study guide with headings, explanations, definitions, formulas (LaTeX), review questions; every section starts with a `[mm:ss]` link.
-- Cached per video in Lectern and shared by everyone who can see the course. Generating is admin-only or on first open (setting), so cost stays predictable.
+- Cached per video in Lectern and shared by everyone who can see the course. Made when someone first asks; `EDUNEST_AI_GENERATE=admins` limits that to admins. Admins can make one again.
 - "Save to my notes" turns sections into the user's own timestamped notes.
-- Models: a small Claude model for translation and chat, a larger one for detailed notes. API key only in compose.
+- Model: Claude Opus 5.5 for everything (`LECTERN_LLM_MODEL`), effort `medium` for summary/notes and `low` for translation; server-side fallback on refusals; the transcript is prompt-cached so summary and notes share it. API key only in compose.
 
-### 11.5 Chat (step 3)
+### 11.5 Chat (step 3) — one video: ✅ built 2026-11-19 (course-wide chat not yet)
 - One video: the whole transcript (with timestamps) goes into the prompt; answers cite clickable timestamps. No retrieval needed: a 1-hour lecture is ~15k tokens.
 - A whole course: transcripts are cut into timed chunks, searched with SQLite FTS5 (BM25), top chunks go into the prompt. Embeddings (sqlite-vec) only if keyword search proves too weak.
 - Answers stream (SSE). History is per user, stored in EduNest.

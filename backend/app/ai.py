@@ -18,7 +18,9 @@ _sync_lock = threading.Lock()
 
 
 class Unavailable(Exception):
-    pass
+    def __init__(self, detail: str, status: int | None = None):
+        super().__init__(f"{status}: {detail}" if status else detail)
+        self.detail, self.status = detail, status
 
 
 def enabled() -> bool:
@@ -33,8 +35,12 @@ def call(method: str, path: str, body=None, timeout: float = 5, raw: bool = Fals
         with urllib.request.urlopen(req, timeout=timeout) as r:
             payload = r.read()
     except urllib.error.HTTPError as e:
-        detail = e.read()[:300].decode("utf-8", "replace")
-        raise Unavailable(f"{e.code}: {detail}") from None
+        detail = e.read()[:500].decode("utf-8", "replace")
+        try:
+            detail = json.loads(detail).get("detail", detail)
+        except (ValueError, AttributeError):
+            pass
+        raise Unavailable(str(detail), e.code) from None
     except (urllib.error.URLError, OSError) as e:
         raise Unavailable(str(e)) from None
     return payload.decode("utf-8", "replace") if raw else json.loads(payload)
@@ -45,6 +51,28 @@ def video_body(lesson: dict, priority: int = 0) -> dict:
     if lesson.get("youtube_id") and len(lesson["youtube_id"]) == 11:
         body["youtube_id"] = lesson["youtube_id"]
     return body
+
+
+def stream(path: str, body: dict):
+    """POST to Lectern and yield its server-sent events as parsed JSON objects."""
+    req = urllib.request.Request(AI_URL + path, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Authorization": f"Bearer {AI_KEY}", "Content-Type": "application/json"})
+    try:
+        r = urllib.request.urlopen(req, timeout=300)
+    except urllib.error.HTTPError as e:
+        detail = e.read()[:500].decode("utf-8", "replace")
+        try:
+            detail = json.loads(detail).get("detail", detail)
+        except (ValueError, AttributeError):
+            pass
+        raise Unavailable(str(detail), e.code) from None
+    except (urllib.error.URLError, OSError) as e:
+        raise Unavailable(str(e)) from None
+    with r:
+        for raw in r:
+            line = raw.decode("utf-8", "replace").strip()
+            if line.startswith("data: "):
+                yield json.loads(line[6:])
 
 
 def register(lesson: dict, priority: int = 0) -> dict:

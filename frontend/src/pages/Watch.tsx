@@ -5,10 +5,11 @@ import { useAuth } from '../auth'
 import Curriculum from '../components/Curriculum'
 import { NoteEditor, NotesList } from '../components/Notes'
 import Player, { type PlayerHandle } from '../components/Player'
+import StudyPanel from '../components/StudyPanel'
 import TranscriptPanel, { isPending, languageName, transcriptLabel } from '../components/Transcript'
 import { fmtTime, useLoad } from '../util'
 
-type Tab = 'notes' | 'contents' | 'chapters' | 'transcript'
+type Tab = 'notes' | 'contents' | 'chapters' | 'transcript' | 'study'
 const SAVE_EVERY_S = 10
 
 export default function Watch() {
@@ -50,8 +51,12 @@ export default function Watch() {
     const list = (l?.subtitles ?? []).map((sub) =>
       /^[a-z]{2,3}(-[A-Za-z0-9]+)*$/.test(sub.label) ? { ...sub, label: languageName(sub.label.replace(/-orig$/, '')) } : sub,
     )
-    if (!l || !tr?.enabled || tr.status !== 'done' || tr.source === 'file') return list
-    return [...list, { index: -1, label: transcriptLabel(tr), lang: tr.language ?? 'und', url: `/api/lessons/${l.id}/transcript.vtt` }]
+    if (!l || !tr?.enabled || tr.status !== 'done') return list
+    const out = tr.source === 'file' ? list
+      : [...list, { index: -1, label: transcriptLabel(tr), lang: tr.language ?? 'und', url: `/api/lessons/${l.id}/transcript.vtt` }]
+    if (tr.translation?.status === 'done')
+      out.push({ index: -2, label: 'English · translated', lang: 'en', url: `/api/lessons/${l.id}/transcript.vtt?lang=en` })
+    return out
   }, [l, tr])
 
   // ---- progress tracking
@@ -299,13 +304,14 @@ export default function Watch() {
 
       {/* Sidebar */}
       <aside className="flex min-h-[400px] flex-col overflow-hidden border-line bg-panel lg:sticky lg:top-20 lg:h-[calc(100vh-6.5rem)] lg:rounded-xl lg:border">
-        <div className="flex shrink-0 border-b border-line">
+        <div className="flex shrink-0 overflow-x-auto border-b border-line [scrollbar-width:none]">
           <TabBtn active={tab === 'notes'} onClick={() => setTab('notes')}>Notes ({sortedNotes.length})</TabBtn>
-          <TabBtn active={tab === 'contents'} onClick={() => setTab('contents')}>Course content</TabBtn>
+          <TabBtn active={tab === 'contents'} onClick={() => setTab('contents')}>Contents</TabBtn>
           {l.chapters.length > 0 && <TabBtn active={tab === 'chapters'} onClick={() => setTab('chapters')}>Chapters</TabBtn>}
           {tr?.enabled && <TabBtn active={tab === 'transcript'} onClick={() => setTab('transcript')}>Transcript</TabBtn>}
+          {tr?.enabled && <TabBtn active={tab === 'study'} onClick={() => setTab('study')}>AI</TabBtn>}
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
           {tab === 'notes' && (
             <NotesList
               notes={sortedNotes}
@@ -327,12 +333,28 @@ export default function Watch() {
           {tab === 'transcript' && tr?.enabled && (
             <TranscriptPanel
               t={tr}
+              lessonId={l.id}
+              onTranslated={() => void transcript.reload()}
               time={time}
               onSeek={seekTo}
               isAdmin={!!user?.is_admin}
               onRetry={async (whisper) => {
                 await api.retryTranscript(l.id, whisper)
                 await transcript.reload()
+              }}
+            />
+          )}
+          {tab === 'study' && tr?.enabled && (
+            <StudyPanel
+              lessonId={l.id}
+              transcriptReady={tr.status === 'done'}
+              isAdmin={!!user?.is_admin}
+              onSeek={seekTo}
+              getTime={() => player.current?.currentTime() ?? 0}
+              onSaveNotes={async (sections) => {
+                const made: Note[] = []
+                for (const s of sections) made.push(await api.createNote(l.id, s.t, s.body))
+                setNotes((ns) => [...ns, ...made])
               }}
             />
           )}
@@ -346,7 +368,7 @@ function TabBtn({ active, onClick, children }: { active: boolean; onClick: () =>
   return (
     <button
       onClick={onClick}
-      className={`-mb-px flex-1 border-b-2 px-3 py-3 text-sm font-medium ${active ? 'border-white text-white' : 'border-transparent text-muted hover:text-white'}`}
+      className={`-mb-px flex-1 whitespace-nowrap border-b-2 px-3 py-3 text-sm font-medium ${active ? 'border-white text-white' : 'border-transparent text-muted hover:text-white'}`}
     >
       {children}
     </button>

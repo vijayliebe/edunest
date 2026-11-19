@@ -21,6 +21,8 @@ services:
       # --- Transcripts and subtitles (optional; remove these two lines and the lectern service to turn off) ---
       - EDUNEST_AI_URL=http://lectern:8000
       - EDUNEST_AI_KEY=change-me-to-a-random-string   # same value as LECTERN_API_KEY below; e.g. openssl rand -hex 24
+      # - EDUNEST_AI_CHAT=everyone            # who can chat with videos: everyone | admins | off
+      # - EDUNEST_AI_CHAT_PER_HOUR=60        # questions per hour for each non-admin user
     volumes:
       - /volume1/docker/edunest:/data                         # database + thumbnails (back this up)
       - /volume1/Videos/Deep Learning:/media/deep-learning:ro # :ro = app can never modify your videos
@@ -44,6 +46,11 @@ services:
       # Optional: reuse MeTube's YouTube cookies if YouTube starts asking for a bot check
       # (Settings -> Transcripts shows that). Lectern works on its own copy, so MeTube's file is never touched.
       # - LECTERN_YT_COOKIES=/cookies/cookies.txt
+      # Optional: summaries, study notes and English subtitles, written by an LLM through OpenRouter
+      # (key from openrouter.ai/keys). Only transcripts are sent, and only when someone asks. Empty = off.
+      - OPENROUTER_API_KEY=
+      # - LECTERN_LLM_MODEL=anthropic/claude-opus-5.5     # default; any model id from openrouter.ai/models
+      # Or use the Anthropic API directly instead:  ANTHROPIC_API_KEY=...  (with OPENROUTER_API_KEY left empty)
     volumes:
       - /volume1/docker/lectern:/data                           # transcripts + downloaded speech model (~0.5 GB)
       # - /volume1/docker/metube/cookies:/cookies:ro          # same folder MeTube mounts at /cookies

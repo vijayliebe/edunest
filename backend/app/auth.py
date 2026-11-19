@@ -250,7 +250,7 @@ def delete_app_user(username: str) -> None:
             raise LookupError("Only users added in Settings can be deleted here")
         with transaction() as c:
             c.execute("DELETE FROM app_user WHERE username=?", (username,))
-            for t in ("session", "user_access", "user_course", "progress", "note", "continue_hidden"):
+            for t in ("session", "user_access", "user_course", "progress", "note", "continue_hidden", "chat_message"):
                 c.execute(f"DELETE FROM {t} WHERE username=?", (username,))
         _refresh_users()
 

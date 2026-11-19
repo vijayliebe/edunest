@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { Transcript as T } from '../api'
+import { api, type Transcript as T, type TranscriptSegment } from '../api'
 import { fmtTime } from '../util'
 
 export function languageName(code?: string | null): string {
@@ -17,7 +17,8 @@ export function transcriptLabel(t: T): string {
 }
 
 const PENDING = new Set(['queued', 'fetching', 'whisper', 'transcribing'])
-export const isPending = (t?: T | null) => !!t?.enabled && PENDING.has(t.status ?? '')
+export const isPending = (t?: T | null) =>
+  !!t?.enabled && (PENDING.has(t.status ?? '') || ['queued', 'working'].includes(t.translation?.status ?? ''))
 
 function localTime(utc: string) {
   return new Date(utc.replace(' ', 'T') + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -53,21 +54,46 @@ function Status({ t }: { t: T }) {
 }
 
 export default function TranscriptPanel({
-  t, time, onSeek, isAdmin, onRetry,
+  t, lessonId, time, onSeek, isAdmin, onRetry, onTranslated,
 }: {
   t: T
+  lessonId: number
   time: number
   onSeek: (s: number) => void
   isAdmin: boolean
   onRetry: (whisper: boolean) => Promise<void>
+  onTranslated: () => void
 }) {
+  const [english, setEnglish] = useState(false)
+  const [enSegs, setEnSegs] = useState<TranscriptSegment[] | null>(null)
+  const tl = t.translation
+  useEffect(() => {
+    setEnglish(false)
+    setEnSegs(null)
+  }, [lessonId])
+  useEffect(() => {
+    if (!english || enSegs || tl?.status !== 'done') return
+    api.transcript(lessonId, 'en').then((r) => setEnSegs(r.segments)).catch(() => setEnglish(false))
+  }, [english, enSegs, tl?.status, lessonId])
+  const translate = async () => {
+    setBusy(true)
+    setErr(null)
+    try {
+      await api.aiGenerate(lessonId, 'translation')
+      onTranslated()
+    } catch (e) {
+      setErr((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
   const [q, setQ] = useState('')
   const [follow, setFollow] = useState(true)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const listRef = useRef<HTMLUListElement>(null)
 
-  const segs = t.segments
+  const segs = english && enSegs ? enSegs : t.segments
   const active = useMemo(() => {
     let lo = 0, hi = segs.length - 1, ans = -1
     while (lo <= hi) {
@@ -136,6 +162,15 @@ export default function TranscriptPanel({
           placeholder="Search transcript"
           className="min-w-0 flex-1 rounded-lg border border-line bg-panel-2 px-3 py-1.5 text-sm outline-none focus:border-accent"
         />
+        {tl?.status === 'done' && (
+          <button
+            onClick={() => setEnglish((e) => !e)}
+            title="Switch between the original language and the English translation"
+            className="shrink-0 rounded-lg border border-line px-2 py-1.5 text-xs hover:bg-white/5"
+          >
+            {english ? 'Original' : 'English'}
+          </button>
+        )}
         <label className="flex shrink-0 items-center gap-1.5 text-xs text-muted" title="Keep the current line in view">
           <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} />
           Follow
@@ -159,7 +194,20 @@ export default function TranscriptPanel({
         <p>
           {transcriptLabel(t)}
           {t.source_detail ? ` (${t.source_detail})` : ''}
+          {english && enSegs ? ' · shown translated to English by AI' : ''}
         </p>
+        {tl && tl.enabled && tl.status !== 'done' && (
+          tl.status === 'queued' || tl.status === 'working' ? (
+            <p>Translating to English… English subtitles will appear in the CC menu when it's done.</p>
+          ) : t.can_generate ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <button disabled={busy} onClick={translate} className="rounded-lg border border-line px-2.5 py-1 text-xs hover:bg-white/5 disabled:opacity-50">
+                Translate to English
+              </button>
+              {tl.status === 'failed' && <span className="text-red-400">Last try failed: {tl.error}</span>}
+            </div>
+          ) : null
+        )}
         {adminTools}
       </div>
     </div>

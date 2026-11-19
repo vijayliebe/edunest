@@ -28,6 +28,13 @@ COVER_NAMES = ("cover", "folder", "poster", "thumbnail")
 # Optional transcript/AI service (Lectern). Unset = feature off, nothing is sent anywhere.
 AI_URL = os.environ.get("EDUNEST_AI_URL", "").strip().rstrip("/")
 AI_KEY = os.environ.get("EDUNEST_AI_KEY", "").strip()
+# Who may ask for a new summary / study notes / translation (they cost money): everyone or admins.
+# Anyone who can see a course can always read what was already made.
+AI_GENERATE = os.environ.get("EDUNEST_AI_GENERATE", "everyone").strip().lower()
+# Chat with a video: everyone (who can see the course) | admins | off; and a per-user hourly limit
+# (admins are not limited) so a public instance can't run up the LLM bill.
+AI_CHAT = os.environ.get("EDUNEST_AI_CHAT", "everyone").strip().lower()
+AI_CHAT_PER_HOUR = int(os.environ.get("EDUNEST_AI_CHAT_PER_HOUR", "60") or 60)
 
 # A lesson counts as completed once this fraction has been watched.
 COMPLETE_RATIO = 0.9

@@ -78,6 +78,40 @@ export interface Transcript {
   error?: string | null
   next_try_at?: string | null
   segments: TranscriptSegment[]
+  /** only for non-English transcripts */
+  translation?: { enabled: boolean; status: AiStatus; error?: string | null }
+  can_generate?: boolean
+}
+
+export type AiKind = 'summary' | 'notes' | 'translation'
+export type AiStatus = 'none' | 'queued' | 'working' | 'done' | 'failed' | 'unavailable'
+
+export interface AiArtifact {
+  enabled: boolean
+  status: AiStatus
+  content?: string | null
+  model?: string | null
+  error?: string | null
+  updated_at?: string | null
+  input_tokens?: number | null
+  output_tokens?: number | null
+  can_generate?: boolean
+  can_regenerate?: boolean
+}
+
+export interface ChatMessage {
+  id?: number
+  role: 'user' | 'assistant'
+  content: string
+  at_s?: number | null
+  created_at?: string
+}
+
+export interface ChatState {
+  enabled: boolean
+  can_chat: boolean
+  transcript_ready: boolean
+  messages: ChatMessage[]
 }
 
 export interface TranscriptsStatus {
@@ -88,6 +122,12 @@ export interface TranscriptsStatus {
   transcribing?: { id: number; path: string; progress: number | null } | null
   youtube?: { enabled: boolean; name_search: boolean; blocked_until: number | null; backoff_level: number }
   whisper?: { enabled: boolean; model: string }
+  llm?: {
+    enabled: boolean
+    model: string
+    jobs?: Record<AiKind, Partial<Record<AiStatus, number>>>
+    tokens?: { input: number; output: number }
+  }
 }
 
 export interface LessonDetail {
@@ -237,6 +277,48 @@ export interface AdminCourse {
 /** Fired when any API call answers 401 (session expired / logged out elsewhere). */
 export const UNAUTHORIZED_EVENT = 'edunest:unauthorized'
 
+/** Ask a question; the answer streams in through onDelta. Resolves when it's complete, rejects with the reason otherwise. */
+async function chatAsk(lessonId: number, message: string, at: number | null, onDelta: (text: string) => void): Promise<void> {
+  const res = await fetch(`/api/lessons/${lessonId}/chat`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, at }),
+  })
+  if (res.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
+  if (!res.ok || !res.body) {
+    let msg = `${res.status} ${res.statusText}`
+    try {
+      const j = await res.json()
+      if (j?.detail) msg = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail)
+    } catch {
+      /* not json */
+    }
+    throw new Error(msg)
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    let i
+    while ((i = buf.indexOf('\n\n')) >= 0) {
+      const chunk = buf.slice(0, i)
+      buf = buf.slice(i + 2)
+      for (const line of chunk.split('\n')) {
+        if (!line.startsWith('data: ')) continue
+        const ev = JSON.parse(line.slice(6))
+        if (ev.delta) onDelta(ev.delta)
+        else if (ev.error) throw new Error(ev.error)
+        else if (ev.done) return
+      }
+    }
+  }
+  throw new Error('The answer stopped unexpectedly; please ask again')
+}
+
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     ...init,
@@ -280,7 +362,14 @@ export const api = {
   course: (id: number) => req<CourseDetail>(`/api/courses/${id}`),
   courseNotes: (id: number) => req<CourseNote[]>(`/api/courses/${id}/notes`),
   lesson: (id: number) => req<LessonDetail>(`/api/lessons/${id}`),
-  transcript: (lessonId: number) => req<Transcript>(`/api/lessons/${lessonId}/transcript`),
+  transcript: (lessonId: number, lang?: 'en') =>
+    req<Transcript>(`/api/lessons/${lessonId}/transcript${lang ? `?lang=${lang}` : ''}`),
+  chat: (lessonId: number) => req<ChatState>(`/api/lessons/${lessonId}/chat`),
+  clearChat: (lessonId: number) => req<void>(`/api/lessons/${lessonId}/chat`, { method: 'DELETE' }),
+  chatAsk,
+  ai: (lessonId: number, kind: AiKind) => req<AiArtifact>(`/api/lessons/${lessonId}/ai/${kind}`),
+  aiGenerate: (lessonId: number, kind: AiKind, again = false) =>
+    req<AiArtifact>(`/api/lessons/${lessonId}/ai/${kind}?again=${again}`, { method: 'POST' }),
   retryTranscript: (lessonId: number, whisper = false) =>
     req<Transcript>(`/api/admin/transcripts/${lessonId}/retry?whisper=${whisper}`, { method: 'POST' }),
   transcriptsStatus: () => req<TranscriptsStatus>('/api/admin/transcripts/status'),
