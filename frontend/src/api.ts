@@ -77,6 +77,10 @@ export interface Transcript {
   language?: string | null
   error?: string | null
   next_try_at?: string | null
+  /** videos that will be handled before this one; null when it isn't waiting in a queue */
+  ahead?: number | null
+  /** someone clicked "Get transcript now" */
+  requested?: boolean
   segments: TranscriptSegment[]
   /** only for non-English transcripts */
   translation?: { enabled: boolean; status: AiStatus; error?: string | null }
@@ -124,7 +128,9 @@ export interface TranscriptsStatus {
   whisper?: { enabled: boolean; model: string }
   llm?: {
     enabled: boolean
+    provider?: 'openrouter' | 'anthropic'
     model: string
+    chat_model?: string
     jobs?: Record<AiKind, Partial<Record<AiStatus, number>>>
     tokens?: { input: number; output: number }
   }
@@ -370,6 +376,7 @@ export const api = {
   ai: (lessonId: number, kind: AiKind) => req<AiArtifact>(`/api/lessons/${lessonId}/ai/${kind}`),
   aiGenerate: (lessonId: number, kind: AiKind, again = false) =>
     req<AiArtifact>(`/api/lessons/${lessonId}/ai/${kind}?again=${again}`, { method: 'POST' }),
+  transcriptNow: (lessonId: number) => req<Transcript>(`/api/lessons/${lessonId}/transcript/now`, { method: 'POST' }),
   retryTranscript: (lessonId: number, whisper = false) =>
     req<Transcript>(`/api/admin/transcripts/${lessonId}/retry?whisper=${whisper}`, { method: 'POST' }),
   transcriptsStatus: () => req<TranscriptsStatus>('/api/admin/transcripts/status'),

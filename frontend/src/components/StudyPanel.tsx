@@ -148,6 +148,15 @@ function Artifact({ kind, lessonId, transcriptReady, isAdmin, onSeek, onSaveNote
     <div>
       <Markdown onSeek={onSeek}>{d.content ?? ''}</Markdown>
       <div className="mt-6 flex flex-wrap items-center gap-2 border-t border-line pt-3 text-xs text-muted">
+        <a
+          href={`/print/notes/${lessonId}${kind === 'summary' ? '?kind=summary' : ''}`}
+          target="_blank"
+          rel="noopener"
+          className={btn}
+          title="Opens a printable page; choose Save as PDF"
+        >
+          Download PDF
+        </a>
         {kind === 'notes' && (
           <button disabled={busy || saved !== null} onClick={save} className={btn}>
             {saved !== null ? `Added ${saved} notes` : 'Save to my notes'}

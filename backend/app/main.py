@@ -548,7 +548,8 @@ def lesson_subtitle(lesson_id: int, index: int, request: Request):
 
 # ---------------------------------------------------------------- transcripts (optional Lectern service)
 
-TRANSCRIPT_FIELDS = ("status", "progress", "source", "source_detail", "language", "error", "next_try_at")
+TRANSCRIPT_FIELDS = ("status", "progress", "source", "source_detail", "language", "error", "next_try_at",
+                     "ahead", "requested")
 
 
 @app.get("/api/lessons/{lesson_id}/transcript")
@@ -753,9 +754,24 @@ def retry_transcript(lesson_id: int, request: Request, whisper: bool = False):
         raise HTTPException(404)
     try:
         v = ai.register(l, priority=1)
-        v = ai.call("POST", f"/v1/videos/{v['id']}/retry?whisper={'true' if whisper else 'false'}")
+        v = ai.call("POST", f"/v1/videos/{v['id']}/retry?whisper={'true' if whisper else 'false'}&priority=2")
     except ai.Unavailable as e:
         raise HTTPException(409 if e.status == 409 else 503, e.detail) from None
+    return {k: v.get(k) for k in TRANSCRIPT_FIELDS}
+
+
+@app.post("/api/lessons/{lesson_id}/transcript/now")
+def transcript_now(lesson_id: int, request: Request):
+    """Anyone who can see the lesson can ask for its transcript to be made next (or tried again if it
+    failed). It costs nothing but NAS time, and each video is still only fetched once."""
+    _, l = access.require_lesson(request, lesson_id)
+    if not ai.enabled():
+        raise HTTPException(404)
+    try:
+        v = ai.register(l, priority=1)
+        v = ai.call("POST", f"/v1/videos/{v['id']}/now")
+    except ai.Unavailable as e:
+        raise HTTPException(503, e.detail) from None
     return {k: v.get(k) for k in TRANSCRIPT_FIELDS}
 
 

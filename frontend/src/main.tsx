@@ -8,6 +8,7 @@ import Layout from './components/Layout'
 import CoursePage from './pages/Course'
 import Home from './pages/Home'
 import NotFound from './pages/NotFound'
+import PrintNotes from './pages/PrintNotes'
 import SearchPage from './pages/Search'
 import Settings from './pages/Settings'
 import Watch from './pages/Watch'
@@ -17,6 +18,7 @@ createRoot(document.getElementById('root')!).render(
     <AuthGate>
     <BrowserRouter>
       <Routes>
+        <Route path="print/notes/:id" element={<PrintNotes />} />
         <Route element={<Layout />}>
           <Route index element={<Home />} />
           <Route path="course/:id" element={<CoursePage />} />

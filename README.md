@@ -8,7 +8,7 @@ An open-source, self-hosted learning app for your NAS or home server. It turns f
 - **Metadata:** read from yt-dlp `.info.json` files, embedded tags, or the filename. That includes YouTube **chapters**, which show on the seek bar. Thumbnails come from sidecar images, embedded covers, or an auto-generated frame.
 - `.srt` and `.vtt` subtitles next to a video are picked up automatically.
 - **Transcripts and subtitles** for every video (optional): a searchable *Transcript* tab that follows the video, and an extra track in the CC menu. They come from subtitle files, YouTube captions, or speech-to-text on the NAS. See [Transcripts](#transcripts-optional).
-- **Summary and study notes** (optional, needs an OpenRouter API key): a *Summary* tab with a short overview of the video and detailed study notes, always in English, with timestamps that jump to the moment. *Save to my notes* turns the study notes into your own timestamped notes. Non-English videos can also get **English subtitles**, translated line by line. See [Summaries and study notes](#summaries-and-study-notes-optional).
+- **Summary and study notes** (optional, needs an OpenRouter API key): an *AI* tab with a short summary, detailed study notes with tables and diagrams (downloadable as PDF), and chat, always in English, with timestamps that jump to the moment. *Save to my notes* turns the study notes into your own timestamped notes. Non-English videos can also get **English subtitles**, translated line by line. See [Summaries and study notes](#summaries-and-study-notes-optional).
 - **Multiple library folders** are managed in **Settings**. Each one is either a *folder of courses* or a *single course*.
 - Renamed or moved files keep their notes and progress, because files are matched by fingerprint.
 - Video folders are mounted read-only, so the app never writes to them.
@@ -69,7 +69,7 @@ YouTube is asked carefully: one request at a time, 10–30 s apart, with a pause
 **To turn it on**
 1. Build and import the Lectern image too: `git clone git@github.com:vijayliebe/lectern.git ../lectern`, then `make lectern-save` → `lectern-latest.tar`.
 2. Use the `lectern` service from [docker-compose.yml](docker-compose.yml). Mount the **same folders at the same paths** as in EduNest, and set the same random key in `LECTERN_API_KEY` and `EDUNEST_AI_KEY` (`openssl rand -hex 24`).
-3. After the next scan, every video is queued. **Settings → Transcripts** shows progress. On the watch page, admins can ask for a video to be looked up again or transcribed from its audio.
+3. After the next scan, every video is queued. **Settings → Transcripts** shows progress. Opening a video moves it up the queue; in its *Transcript* tab, **Get transcript now** puts it first (anyone who can see the course can click it), and shows how many videos are ahead. Admins can also have a video looked up again or transcribed from its audio.
 
 **MeTube settings, recommended:** add these options to MeTube's `YTDL_OPTIONS` so new downloads come with their YouTube id and English captions, and no YouTube lookups are needed later. Keep any options you already have in the same JSON object, e.g. with a cookie file:
 ```yaml
@@ -84,12 +84,12 @@ Only the untranslated English track (`en-orig`) is requested on purpose. A faile
 
 With an LLM API key (OpenRouter by default), Lectern also writes, from each video's transcript and always in English, whatever language the video is in (Hindi included):
 - a **summary**: what the video covers, its key points and an outline, each linked to its moment in the video;
-- **study notes**: the video part by part, with explanations, definitions, formulas and examples, and review questions at the end. *Save to my notes* adds each part to your own notes, at its moment in the video;
+- **study notes**: a mind map of the topics, then the video part by part with bullet points, tables, diagrams (flowcharts, sequence diagrams, mind maps, drawn from Mermaid; click one to see it full size), formulas, examples and "remember" boxes, and review questions at the end. *Save to my notes* adds each part to your own notes, at its moment in the video; **Download PDF** opens a printable page (choose *Save as PDF*) whose timestamps link back to the video;
 - **English subtitles** for a non-English video: the *Translate to English* button in the Transcript tab adds an "English · translated" track to the CC menu and an Original/English switch to the transcript.
 
 Each is made when someone first asks for it (it takes up to a few minutes), once per video, and is then shared by everyone who can see that course. They're made again only if the transcript changes, or if an admin clicks *Write again*.
 
-**To turn it on**, add your OpenRouter key to the `lectern` service in the compose file (`OPENROUTER_API_KEY=...`, from openrouter.ai/keys) and redeploy. The default model is Claude Opus 5.5 (`anthropic/claude-opus-5.5`); set `LECTERN_LLM_MODEL` to use any other model OpenRouter offers. To use the Anthropic API directly instead, set `ANTHROPIC_API_KEY` and leave `OPENROUTER_API_KEY` empty. To let only admins ask for new ones, set `EDUNEST_AI_GENERATE=admins` in EduNest. Everyone can still read the ones that exist.
+**To turn it on**, add your OpenRouter key to the `lectern` service in the compose file (`OPENROUTER_API_KEY=...`, from openrouter.ai/keys) and redeploy. Choose the model there too: `LECTERN_LLM_MODEL` (summaries, notes, translations) and optionally `LECTERN_LLM_CHAT_MODEL` (chat), any model id from openrouter.ai/models. If you leave `LECTERN_LLM_MODEL` empty, `anthropic/claude-opus-5.5` is used. **Settings → Transcripts** shows which models are in use and the tokens used so far. To use the Anthropic API directly instead, set `ANTHROPIC_API_KEY` and leave `OPENROUTER_API_KEY` empty. To let only admins ask for new ones, set `EDUNEST_AI_GENERATE=admins` in EduNest. Everyone can still read the ones that exist.
 
 **Cost and privacy:** only the transcript and the video's title are sent to the LLM provider (OpenRouter, which passes them to the model's maker), never the video, and only when someone asks. With the default model (Claude Opus 5.5) a 1-hour lecture costs roughly 10 cents for a summary, 15–25 cents for study notes and 30–40 cents for a translation. Admins see the tokens used under each one. The text is written by AI and can contain mistakes.
 

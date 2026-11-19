@@ -22,6 +22,28 @@ body {
 
 .prose-note { @apply prose prose-invert prose-sm max-w-none prose-p:my-1 prose-pre:my-2 prose-ul:my-1 prose-ol:my-1 prose-headings:my-2 prose-code:before:content-none prose-code:after:content-none; }
 .prose-note code { @apply rounded bg-white/10 px-1 py-0.5 text-[0.85em]; }
+.prose-note table { @apply my-3 block overflow-x-auto text-[0.9em]; }
+.prose-note th, .prose-note td { @apply border border-white/15 px-2 py-1 align-top; }
+.prose-note th { @apply bg-white/5; }
+.prose-note blockquote { @apply border-l-accent not-italic text-slate-200; }
+.prose-note blockquote p:first-of-type::before, .prose-note blockquote p:last-of-type::after { content: none; }
+.prose-note .mermaid-diagram { @apply bg-black/20; }
+
+/* printable notes (light paper) */
+.prose-print { @apply prose prose-slate max-w-none prose-code:before:content-none prose-code:after:content-none; }
+.prose-print th, .prose-print td { @apply border border-slate-300 px-2 py-1 align-top; }
+.prose-print th { @apply bg-slate-100; }
+.prose-print blockquote { @apply border-l-indigo-500 not-italic; }
+.prose-print blockquote p:first-of-type::before, .prose-print blockquote p:last-of-type::after { content: none; }
+.prose-print pre { @apply whitespace-pre-wrap; }
+.prose-print .ts-link { @apply font-mono text-indigo-700 no-underline; }
+@media print {
+  .no-print { display: none !important; }
+  .print-page { min-height: 0; }
+  .prose-print h2, .prose-print h3 { break-after: avoid; }
+  .prose-print table, .prose-print pre, .prose-print .mermaid-diagram, .prose-print blockquote { break-inside: avoid; }
+  @page { margin: 16mm; }
+}
 .prose-note mark, mark { @apply rounded bg-note/30 px-0.5 text-inherit; }
 
 /* range slider used for volume */

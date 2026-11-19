@@ -24,17 +24,27 @@ function localTime(utc: string) {
   return new Date(utc.replace(' ', 'T') + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
+function queueText(t: T): string {
+  if (t.ahead == null) return ''
+  if (t.ahead === 0) return ' It is next.'
+  return ` ${t.ahead} ${t.ahead === 1 ? 'video is' : 'videos are'} ahead of it.`
+}
+
 function Status({ t }: { t: T }) {
   switch (t.status) {
-    case 'queued':
     case 'fetching':
+      return <p>Looking for subtitles and YouTube captions for this video now…</p>
+    case 'queued':
       return t.next_try_at ? (
-        <p>YouTube asked us to slow down. Trying again at {localTime(t.next_try_at)}.</p>
+        <p>
+          Waiting to try again at {localTime(t.next_try_at)}
+          {t.error ? ` (${t.error})` : ''}.
+        </p>
       ) : (
-        <p>Looking for subtitles and YouTube captions…</p>
+        <p>Waiting to look for subtitles and YouTube captions.{queueText(t)}</p>
       )
     case 'whisper':
-      return <p>No subtitles found anywhere, so this video will be transcribed from its audio. It's waiting in the queue.</p>
+      return <p>No subtitles found anywhere, so this video will be transcribed from its audio.{queueText(t)}</p>
     case 'transcribing':
       return (
         <div>
@@ -132,14 +142,41 @@ export default function TranscriptPanel({
     }
   }
 
-  const adminTools = isAdmin && (t.status === 'done' || t.status === 'failed') && (
-    <div className="flex flex-wrap gap-2">
-      <button disabled={busy} onClick={() => retry(false)} className="rounded-lg border border-line px-2.5 py-1 text-xs hover:bg-white/5 disabled:opacity-50">
-        Look again
-      </button>
-      <button disabled={busy} onClick={() => retry(true)} className="rounded-lg border border-line px-2.5 py-1 text-xs hover:bg-white/5 disabled:opacity-50">
-        Transcribe from audio
-      </button>
+  const now = async () => {
+    setBusy(true)
+    setErr(null)
+    try {
+      await api.transcriptNow(lessonId)
+      onTranslated() // reloads the transcript status
+    } catch (e) {
+      setErr((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const btn = 'rounded-lg border border-line px-2.5 py-1 text-xs hover:bg-white/5 disabled:opacity-50'
+  const waiting = t.status === 'queued' || t.status === 'whisper'
+  const tools = (
+    <div className="flex flex-wrap items-center gap-2">
+      {waiting && (t.requested ? (
+        <span className="text-xs">Requested: this video goes first.</span>
+      ) : (
+        <button disabled={busy} onClick={now} className={btn} title="Put this video ahead of all others">
+          Get transcript now
+        </button>
+      ))}
+      {t.status === 'failed' && (
+        <button disabled={busy} onClick={now} className={btn}>Try again</button>
+      )}
+      {isAdmin && t.status === 'done' && (
+        <button disabled={busy} onClick={() => retry(false)} className={btn}>Look again</button>
+      )}
+      {isAdmin && t.status !== 'transcribing' && t.status !== 'fetching' && t.status !== 'unavailable' && (
+        <button disabled={busy} onClick={() => retry(true)} className={btn} title="Skip subtitles and YouTube; make the transcript from the audio, next in line">
+          Transcribe from audio
+        </button>
+      )}
       {err && <span className="text-xs text-red-400">{err}</span>}
     </div>
   )
@@ -148,7 +185,7 @@ export default function TranscriptPanel({
     return (
       <div className="space-y-3 p-4 text-sm text-muted">
         <Status t={t} />
-        {adminTools}
+        {tools}
       </div>
     )
   }
@@ -208,7 +245,7 @@ export default function TranscriptPanel({
             </div>
           ) : null
         )}
-        {adminTools}
+        {tools}
       </div>
     </div>
   )

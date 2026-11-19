@@ -199,6 +199,17 @@ function TranscriptsSection() {
             {d.youtube?.enabled && `, name search ${d.youtube.name_search ? 'on' : 'off'}`} · speech-to-text{' '}
             {d.whisper?.enabled ? `on (${d.whisper.model})` : 'off'}
           </p>
+          <p className="text-xs">
+            Summaries, study notes and chat:{' '}
+            {d.llm?.enabled
+              ? <>
+                  <code>{d.llm.model}</code>
+                  {d.llm.chat_model && d.llm.chat_model !== d.llm.model && <> (chat: <code>{d.llm.chat_model}</code>)</>}
+                  {' '}via {d.llm.provider === 'anthropic' ? 'the Anthropic API' : 'OpenRouter'}
+                  {d.llm.tokens && ` · ${d.llm.tokens.input.toLocaleString()} input / ${d.llm.tokens.output.toLocaleString()} output tokens used so far`}
+                </>
+              : 'off (set OPENROUTER_API_KEY in the lectern service)'}
+          </p>
         </div>
       )}
     </section>

@@ -49,7 +49,11 @@ services:
       # Optional: summaries, study notes and English subtitles, written by an LLM through OpenRouter
       # (key from openrouter.ai/keys). Only transcripts are sent, and only when someone asks. Empty = off.
       - OPENROUTER_API_KEY=
-      # - LECTERN_LLM_MODEL=anthropic/claude-opus-5.5     # default; any model id from openrouter.ai/models
+      # Which OpenRouter model writes summaries, study notes and translations: any id from openrouter.ai/models,
+      # e.g. anthropic/claude-opus-5.5, anthropic/claude-sonnet-5.5, google/gemini-..., openai/gpt-...
+      - LECTERN_LLM_MODEL=anthropic/claude-opus-5.5
+      # Model for chat answers; empty = same as LECTERN_LLM_MODEL. A faster, cheaper one works well here.
+      - LECTERN_LLM_CHAT_MODEL=
       # Or use the Anthropic API directly instead:  ANTHROPIC_API_KEY=...  (with OPENROUTER_API_KEY left empty)
     volumes:
       - /volume1/docker/lectern:/data                           # transcripts + downloaded speech model (~0.5 GB)
